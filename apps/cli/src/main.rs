@@ -52,6 +52,7 @@ mod setup;
 mod sitemap;
 mod snapshot;
 mod ws;
+mod xxe;
 
 /// Nullhawk — the modern offensive security workbench.
 #[derive(Debug, Parser)]
@@ -873,6 +874,49 @@ enum Command {
         /// Also list undiscovered endpoints referenced by the scripts.
         #[arg(long)]
         endpoints: bool,
+    },
+
+    /// Test an XML endpoint for XML External Entity (XXE) injection.
+    ///
+    /// Sends a crafted XML body whose external entity reads a local file (in-band) or
+    /// points at a collaborator (out-of-band, with --server). File contents in the response,
+    /// or a callback, prove the parser resolves external entities. Sends a (usually
+    /// state-changing) request, so point it only at an endpoint you are authorized to test.
+    Xxe {
+        /// The target URL.
+        url: String,
+
+        /// Collaborator authority for the blind out-of-band probe (from `oob serve`).
+        #[arg(long, value_name = "AUTHORITY")]
+        server: Option<String>,
+
+        /// The root element name of the crafted document.
+        #[arg(long, value_name = "NAME", default_value = "data")]
+        root: String,
+
+        /// The local file the in-band probe tries to read.
+        #[arg(long, value_name = "PATH", default_value = "/etc/passwd")]
+        file: String,
+
+        /// HTTP method (default POST).
+        #[arg(long, value_name = "METHOD")]
+        method: Option<String>,
+
+        /// Extra header, `Name: value`. Repeatable.
+        #[arg(long = "header", value_name = "H")]
+        header: Vec<String>,
+
+        /// Seconds to wait for an out-of-band callback before polling.
+        #[arg(long, value_name = "SECS", default_value_t = 5)]
+        wait: u64,
+
+        /// Do not verify the target's TLS certificate.
+        #[arg(long)]
+        insecure: bool,
+
+        /// Do not ask before sending.
+        #[arg(long)]
+        yes: bool,
     },
 
     /// Test an LLM-backed endpoint for prompt injection.
@@ -2080,6 +2124,31 @@ fn run(cli: &Cli) -> nullhawk_types::Result<()> {
             endpoints: *endpoints,
             json: cli.json,
         }),
+        Command::Xxe {
+            url,
+            server,
+            root,
+            file,
+            method,
+            header,
+            wait,
+            insecure,
+            yes,
+        } => {
+            license::gate().require(nullhawk_engine::license::Feature::ActiveScanner)?;
+            xxe::run(xxe::Args {
+                url,
+                server: server.as_deref(),
+                root,
+                file,
+                method: method.as_deref(),
+                headers: header,
+                wait: *wait,
+                insecure: *insecure,
+                yes: *yes,
+                json: cli.json,
+            })
+        }
         Command::Jwt(JwtCommand::Decode { token }) => jwt::decode(jwt::DecodeArgs {
             token,
             json: cli.json,

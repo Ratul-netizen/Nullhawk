@@ -44,6 +44,7 @@ mod proxy;
 mod race;
 mod repeat;
 mod report;
+mod retire;
 mod scan;
 mod scope;
 mod send;
@@ -874,6 +875,20 @@ enum Command {
         /// Also list undiscovered endpoints referenced by the scripts.
         #[arg(long)]
         endpoints: bool,
+    },
+
+    /// Flag known-vulnerable JavaScript libraries in the captured scripts.
+    ///
+    /// Reads the scripts already in the project — it sends nothing — identifies each
+    /// library and version from its banner or filename, and reports the ones whose version
+    /// is below the release that fixed a known vulnerability.
+    Retire {
+        /// Project directory.
+        path: PathBuf,
+
+        /// Only scripts served by this host (bare host or host:port).
+        #[arg(long, value_name = "HOST")]
+        host: Option<String>,
     },
 
     /// Test an XML endpoint for XML External Entity (XXE) injection.
@@ -2122,6 +2137,11 @@ fn run(cli: &Cli) -> nullhawk_types::Result<()> {
             project: path.clone(),
             host: host.clone(),
             endpoints: *endpoints,
+            json: cli.json,
+        }),
+        Command::Retire { path, host } => retire::run(retire::Args {
+            project: path.clone(),
+            host: host.clone(),
             json: cli.json,
         }),
         Command::Xxe {

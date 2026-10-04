@@ -142,7 +142,8 @@ fn work_items(project: &Project, selection: &Selection) -> Result<Vec<Hypothesis
             .chain(crate::checks::dom_xss::suspect(exchange))
             .chain(crate::checks::access::suspect(exchange))
             .chain(crate::checks::cache_deception::suspect(exchange))
-            .chain(crate::checks::smuggling::suspect(exchange));
+            .chain(crate::checks::smuggling::suspect(exchange))
+            .chain(crate::checks::jwt_secret::suspect(exchange));
 
         for hypothesis in raised_here {
             if is_ours(&hypothesis, &ours) {

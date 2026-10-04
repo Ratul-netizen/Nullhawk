@@ -29,6 +29,7 @@ mod history;
 mod identifiers;
 mod identity;
 mod import;
+mod jsminer;
 mod jwt;
 mod license;
 mod llm;
@@ -855,6 +856,24 @@ enum Command {
     /// Read a JSON Web Token, and forge the variants that test whether a server verifies one.
     #[command(subcommand)]
     Jwt(JwtCommand),
+
+    /// Mine captured JavaScript for leaked secrets and undiscovered endpoints.
+    ///
+    /// Reads the scripts already in the project — it sends nothing — and reports hard-coded
+    /// API keys, tokens and private keys, and the path- and URL-shaped strings the scripts
+    /// reference that are not yet in the captured traffic.
+    Jsminer {
+        /// Project directory.
+        path: PathBuf,
+
+        /// Only scripts served by this host (bare host or host:port).
+        #[arg(long, value_name = "HOST")]
+        host: Option<String>,
+
+        /// Also list undiscovered endpoints referenced by the scripts.
+        #[arg(long)]
+        endpoints: bool,
+    },
 
     /// Test an LLM-backed endpoint for prompt injection.
     ///
@@ -1995,6 +2014,16 @@ fn run(cli: &Cli) -> nullhawk_types::Result<()> {
                 json: cli.json,
             })
         }
+        Command::Jsminer {
+            path,
+            host,
+            endpoints,
+        } => jsminer::run(jsminer::Args {
+            project: path.clone(),
+            host: host.clone(),
+            endpoints: *endpoints,
+            json: cli.json,
+        }),
         Command::Jwt(JwtCommand::Decode { token }) => jwt::decode(jwt::DecodeArgs {
             token,
             json: cli.json,

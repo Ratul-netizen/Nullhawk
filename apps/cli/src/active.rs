@@ -178,6 +178,25 @@ pub fn active(args: Args<'_>) -> Result<()> {
             check.about().intrusiveness != nullhawk_types::verify::Intrusiveness::Loud
         });
     }
+    // `--detector` scopes the *plan*, not just the output: the passive selection narrows
+    // which observations are read, but an active work item is raised by a `suspect` chain
+    // that runs regardless, so without this filter the flag left every other detector in
+    // the queue to spend the budget before the asked-for one was reached. A hypothesis is
+    // kept when the named detector is the one that raised it (its own id) or the one that
+    // settles it (the check's id) — the two differ for some checks.
+    let hypotheses = match args.detector {
+        Some(detector) => hypotheses
+            .into_iter()
+            .filter(|hypothesis| {
+                hypothesis.detector == detector
+                    || checks.iter().any(|check| {
+                        check.about().id.to_string() == detector && check.handles(hypothesis)
+                    })
+            })
+            .collect(),
+        None => hypotheses,
+    };
+
     let plan = Plan::prepare(&project, &lab, &checks, &hypotheses, &budget)?;
 
     if args.json {
@@ -233,10 +252,19 @@ pub fn active(args: Args<'_>) -> Result<()> {
         saved
     };
 
+    // How many experiments each check had queued, so the summary can tell a check that
+    // was reached and settled nothing from one the run never got to before its ceiling.
+    let mut planned: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for subject in &plan.work {
+        if let Some(check) = checks.iter().find(|c| c.handles(&subject.hypothesis)) {
+            *planned.entry(check.about().id.to_string()).or_insert(0) += 1;
+        }
+    }
+
     if args.json {
         print_json(&outcome, &saved);
     } else {
-        print_human(&outcome, &saved, args.no_save);
+        print_human(&outcome, &saved, args.no_save, &planned);
     }
     Ok(())
 }
@@ -428,7 +456,12 @@ fn print_plan_json(plan: &Plan) {
     );
 }
 
-fn print_human(outcome: &Outcome, saved: &[Recorded], no_save: bool) {
+fn print_human(
+    outcome: &Outcome,
+    saved: &[Recorded],
+    no_save: bool,
+    planned: &std::collections::BTreeMap<String, usize>,
+) {
     println!();
     println!(
         "{} request(s) sent across {} experiment(s).",
@@ -531,17 +564,20 @@ fn print_human(outcome: &Outcome, saved: &[Recorded], no_save: bool) {
             "CHECK", "VERSION", "TESTED", "FILED"
         );
         for detector in &outcome.detectors {
+            // A zero is one of two different things, and conflating them is the wart this
+            // distinguishes: a check that was reached and raised nothing ("nothing to
+            // settle") versus one the run queued experiments for but stopped before
+            // reaching ("not reached") — the latter is not a refutation, and reads as one.
+            let note = if detector.hypotheses > 0 {
+                String::new()
+            } else if planned.get(&detector.detector).copied().unwrap_or(0) > 0 {
+                "not reached — raise --max-requests".to_string()
+            } else {
+                "nothing to settle".to_string()
+            };
             println!(
                 "{:<24} {:<12} {:>10} {:>10} {}",
-                detector.detector,
-                detector.version,
-                detector.hypotheses,
-                detector.reportable,
-                if detector.hypotheses == 0 {
-                    "nothing to settle"
-                } else {
-                    ""
-                }
+                detector.detector, detector.version, detector.hypotheses, detector.reportable, note,
             );
         }
     }

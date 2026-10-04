@@ -166,6 +166,44 @@ fn decode_segment(segment: &str, which: &'static str) -> Result<Value, NullhawkE
         .map_err(|_| NullhawkError::invalid_input("token", format!("the {which} is not JSON")))
 }
 
+/// Whether `secret` is the HMAC key that signed this token.
+///
+/// For `HS256`/`HS384`/`HS512` only — those are the algorithms with a shared secret a
+/// weak-key test can guess. Returns `false` for any other algorithm (an asymmetric one
+/// has no guessable secret), for an unsigned token, and for anything malformed. The
+/// comparison is constant-time (`ring::hmac::verify`), and it is computed over the
+/// token's *own* `header.payload` bytes, so a match means the server's verifier, given
+/// this secret, would accept this exact token.
+pub fn hs_secret_matches(token: &str, secret: &[u8]) -> bool {
+    let token = token.strip_prefix("Bearer ").unwrap_or(token).trim();
+    // The signature is everything after the last dot; the signing input is everything
+    // before it, and must itself be `header.payload`.
+    let Some((signing_input, sig_b64)) = token.rsplit_once('.') else {
+        return false;
+    };
+    let Some((header_b64, _payload_b64)) = signing_input.split_once('.') else {
+        return false;
+    };
+    let (Some(sig), Some(header_bytes)) = (base64url_decode(sig_b64), base64url_decode(header_b64))
+    else {
+        return false;
+    };
+    if sig.is_empty() {
+        return false;
+    }
+    let Ok(header) = serde_json::from_slice::<Value>(&header_bytes) else {
+        return false;
+    };
+    let algorithm = match header.get("alg").and_then(Value::as_str) {
+        Some("HS256") => ring::hmac::HMAC_SHA256,
+        Some("HS384") => ring::hmac::HMAC_SHA384,
+        Some("HS512") => ring::hmac::HMAC_SHA512,
+        _ => return false,
+    };
+    let key = ring::hmac::Key::new(algorithm, secret);
+    ring::hmac::verify(&key, signing_input.as_bytes(), &sig).is_ok()
+}
+
 /// Encodes bytes as unpadded base64url, the form a JWT writes.
 pub fn base64url_encode(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -285,6 +323,40 @@ mod tests {
             assert!(reparsed.signature.is_empty());
             // The claims survive unchanged — only the signing was removed.
             assert_eq!(reparsed.payload["sub"], json!("alice"));
+        }
+    }
+
+    #[test]
+    fn a_weak_secret_is_recognised_and_a_wrong_one_is_not() {
+        let token = hs256(
+            &json!({"alg": "HS256"}),
+            &json!({"sub": "alice"}),
+            b"secret",
+        );
+        assert!(hs_secret_matches(&token, b"secret"));
+        assert!(hs_secret_matches(&format!("Bearer {token}"), b"secret"));
+        assert!(!hs_secret_matches(&token, b"not-the-secret"));
+        assert!(!hs_secret_matches(&token, b""));
+    }
+
+    #[test]
+    fn only_hmac_algorithms_have_a_guessable_secret() {
+        // An unsigned or non-HMAC token has no shared secret, so no candidate "matches".
+        let none = Jwt::parse(&hs256(&json!({"alg": "HS256"}), &json!({"sub": "a"}), b"k"))
+            .unwrap()
+            .with_alg_none("none");
+        assert!(!hs_secret_matches(&none, b"k"));
+        // A token whose header claims RS256 is never HMAC-verified, whatever the secret.
+        let rs = format!(
+            "{}.{}.{}",
+            base64url_encode(br#"{"alg":"RS256"}"#),
+            base64url_encode(br#"{"sub":"a"}"#),
+            base64url_encode(b"whatever")
+        );
+        assert!(!hs_secret_matches(&rs, b"whatever"));
+        // Malformed input never matches.
+        for bad in ["", "one.two", "not-a-token"] {
+            assert!(!hs_secret_matches(bad, b"k"), "{bad:?}");
         }
     }
 

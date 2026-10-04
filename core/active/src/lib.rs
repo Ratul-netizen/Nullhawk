@@ -337,6 +337,7 @@ pub fn active_checks() -> Vec<Box<dyn ActiveCheck>> {
         Box::new(checks::stored_xss::StoredXss),
         Box::new(checks::dom_xss::DomXss),
         Box::new(checks::smuggling::RequestSmuggling),
+        Box::new(checks::jwt_secret::JwtWeakSecret),
     ]
 }
 

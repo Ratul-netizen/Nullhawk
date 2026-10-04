@@ -16,6 +16,7 @@ pub mod crossid;
 pub mod dom_xss;
 pub mod echo;
 pub mod host_header;
+pub mod jwt_secret;
 pub mod redirect;
 pub mod reflection;
 pub mod smuggling;

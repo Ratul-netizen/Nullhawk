@@ -52,6 +52,7 @@ mod sequencer;
 mod setup;
 mod sitemap;
 mod snapshot;
+mod upload;
 mod ws;
 mod xxe;
 
@@ -924,6 +925,37 @@ enum Command {
         /// Seconds to wait for an out-of-band callback before polling.
         #[arg(long, value_name = "SECS", default_value_t = 5)]
         wait: u64,
+
+        /// Do not verify the target's TLS certificate.
+        #[arg(long)]
+        insecure: bool,
+
+        /// Do not ask before sending.
+        #[arg(long)]
+        yes: bool,
+    },
+
+    /// Test a file-upload endpoint for weak validation.
+    ///
+    /// Sends a battery of dangerous files (a web shell, a double-extension file, an SVG and
+    /// an HTML page carrying script, a GIF-magic polyglot) plus a benign control, and flags
+    /// which dangerous ones the endpoint accepted the same way it accepted the control.
+    /// Sends state-changing uploads, so point it only at an endpoint you are authorized to.
+    Upload {
+        /// The upload endpoint URL.
+        url: String,
+
+        /// The multipart field name the file goes in.
+        #[arg(long, value_name = "NAME", default_value = "file")]
+        field: String,
+
+        /// HTTP method (default POST).
+        #[arg(long, value_name = "METHOD")]
+        method: Option<String>,
+
+        /// Extra header, `Name: value`. Repeatable.
+        #[arg(long = "header", value_name = "H")]
+        header: Vec<String>,
 
         /// Do not verify the target's TLS certificate.
         #[arg(long)]
@@ -2144,6 +2176,25 @@ fn run(cli: &Cli) -> nullhawk_types::Result<()> {
             host: host.clone(),
             json: cli.json,
         }),
+        Command::Upload {
+            url,
+            field,
+            method,
+            header,
+            insecure,
+            yes,
+        } => {
+            license::gate().require(nullhawk_engine::license::Feature::ActiveScanner)?;
+            upload::run(upload::Args {
+                url,
+                field,
+                method: method.as_deref(),
+                headers: header,
+                insecure: *insecure,
+                yes: *yes,
+                json: cli.json,
+            })
+        }
         Command::Xxe {
             url,
             server,

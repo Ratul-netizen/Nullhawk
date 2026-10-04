@@ -43,8 +43,13 @@ pub fn run(args: Args) -> Result<()> {
     let mut secrets: BTreeMap<(String, String), String> = BTreeMap::new(); // (kind, match) -> source url
     let mut endpoints: BTreeMap<String, BTreeSet<String>> = BTreeMap::new(); // path -> source urls
     let mut captured_paths: BTreeSet<String> = BTreeSet::new();
+    let mut target_hosts: BTreeSet<String> = BTreeSet::new();
     let mut scripts = 0usize;
 
+    // Pass one: metadata only — the paths the project already holds (so a discovered
+    // endpoint can be set aside if it is one) and the hosts it captured traffic from (so
+    // an absolute URL in a script is only an endpoint when it points at one of them). No
+    // bodies are read here.
     let mut cursor = None;
     loop {
         let page = store.history(cursor.as_ref(), Limit::new(PAGE))?;
@@ -52,6 +57,21 @@ pub fn run(args: Args) -> Result<()> {
             if let Some(path) = path_of(&item.url) {
                 captured_paths.insert(path);
             }
+            if let Some(host) = host_of(&item.url) {
+                target_hosts.insert(host);
+            }
+        }
+        match page.next {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+
+    // Pass two: read the scripts and scan them.
+    let mut cursor = None;
+    loop {
+        let page = store.history(cursor.as_ref(), Limit::new(PAGE))?;
+        for item in &page.items {
             if let Some(host) = &args.host {
                 if !matches_host(&item.url, host) {
                     continue;
@@ -73,7 +93,7 @@ pub fn run(args: Args) -> Result<()> {
                     .or_insert_with(|| item.url.clone());
             }
             if args.endpoints {
-                for path in scanner.endpoints(&text) {
+                for path in scanner.endpoints(&text, &target_hosts) {
                     endpoints.entry(path).or_default().insert(item.url.clone());
                 }
             }
@@ -192,7 +212,9 @@ impl Scanner {
 
         Scanner {
             secrets,
-            endpoint_url: Regex::new(r#"https?://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]{4,}"#)
+            // No `'` `(` `)` `,` `;` `[` `]` — those terminate a URL literal in JS source, and
+            // including them swallowed the trailing `';` of `"http://…/1999/xhtml";`.
+            endpoint_url: Regex::new(r#"https?://[A-Za-z0-9._~:/?#@!$&*+=%-]{4,}"#)
                 .expect("static url pattern"),
             // A quoted string that starts with a single `/` and looks like a path.
             endpoint_path: Regex::new(r#"["'`](/[A-Za-z0-9_][A-Za-z0-9_./\-]{2,})["'`]"#)
@@ -213,10 +235,20 @@ impl Scanner {
         out
     }
 
-    fn endpoints(&self, text: &str) -> Vec<String> {
+    fn endpoints(&self, text: &str, target_hosts: &BTreeSet<String>) -> Vec<String> {
         let mut out = BTreeSet::new();
         for m in self.endpoint_url.find_iter(text) {
-            if let Some(path) = path_of(m.as_str()) {
+            // An absolute URL is only the application's surface when it points at one of
+            // the hosts in the project; a W3C spec or a blog link quoted in a library is
+            // not an endpoint of the target, and reporting its path would be noise.
+            let url = m.as_str();
+            let on_target = host_of(url)
+                .map(|host| target_hosts.contains(&host))
+                .unwrap_or(false);
+            if !on_target {
+                continue;
+            }
+            if let Some(path) = path_of(url) {
                 if is_interesting_path(&path) {
                     out.insert(path);
                 }
@@ -249,7 +281,21 @@ fn is_interesting_path(path: &str) -> bool {
     if path.contains("${") || path.contains("{{") {
         return false;
     }
+    // A fragment-only reference (`/#section`) is an anchor, not an endpoint; and a stray
+    // quote or delimiter means the capture ran past the string, so it is not a clean path.
+    if path.starts_with("/#") || path.contains(['\'', '"', '`', ';', ',']) {
+        return false;
+    }
     path.len() >= 3
+}
+
+/// The host of an absolute URL, lowercased, without the port.
+fn host_of(url: &str) -> Option<String> {
+    let after = url.split_once("://")?.1;
+    let authority = after.split(['/', '?', '#']).next().unwrap_or(after);
+    let host = authority.split('@').next_back().unwrap_or(authority);
+    let host = host.split(':').next().unwrap_or(host);
+    (!host.is_empty()).then(|| host.to_ascii_lowercase())
 }
 
 fn is_javascript(store: &TrafficStore, id: RequestId, url: &str) -> bool {
@@ -350,6 +396,7 @@ mod tests {
     #[test]
     fn endpoints_are_paths_not_assets_or_placeholders() {
         let s = Scanner::new();
+        let hosts: BTreeSet<String> = ["api.example.com".to_string()].into_iter().collect();
         let js = r#"
             fetch("/api/v2/admin/users");
             axios.get("https://api.example.com/internal/metrics");
@@ -357,7 +404,7 @@ mod tests {
             const t = "/${userId}/profile";
             load("/a");
         "#;
-        let found = s.endpoints(js);
+        let found = s.endpoints(js, &hosts);
         assert!(
             found.iter().any(|p| p == "/api/v2/admin/users"),
             "{found:?}"
@@ -375,6 +422,45 @@ mod tests {
         assert!(!is_interesting_path("/app.css"));
         assert!(!is_interesting_path("/vendor.js"));
         assert!(!is_interesting_path("/img/{{name}}"));
+    }
+
+    #[test]
+    fn an_absolute_url_to_another_host_is_not_the_targets_endpoint() {
+        // The ginandjuice dogfood: a W3C spec URL in a library must not be reported as an
+        // endpoint of the target, and its trailing quote must not survive the capture.
+        let s = Scanner::new();
+        let hosts: BTreeSet<String> = ["ginandjuice.shop".to_string()].into_iter().collect();
+        let js = r#"var ns = "http://www.w3.org/1999/xhtml"; fetch("https://ginandjuice.shop/catalog/filter");"#;
+        let found = s.endpoints(js, &hosts);
+        assert!(found.iter().any(|p| p == "/catalog/filter"), "{found:?}");
+        assert!(
+            !found.iter().any(|p| p.contains("1999")),
+            "off-host path leaked: {found:?}"
+        );
+        assert!(
+            !found.iter().any(|p| p.contains('\'') || p.contains(';')),
+            "trailing junk: {found:?}"
+        );
+    }
+
+    #[test]
+    fn host_of_extracts_the_bare_host() {
+        assert_eq!(
+            host_of("https://H.example.com:8443/a?b#c").as_deref(),
+            Some("h.example.com")
+        );
+        assert_eq!(
+            host_of("http://user@host.example/x").as_deref(),
+            Some("host.example")
+        );
+        assert_eq!(host_of("/relative/only"), None);
+    }
+
+    #[test]
+    fn a_fragment_only_reference_is_not_an_endpoint() {
+        assert!(!is_interesting_path("/#section"));
+        assert!(!is_interesting_path("/1999/xhtml';"));
+        assert!(is_interesting_path("/api/users"));
     }
 
     #[test]

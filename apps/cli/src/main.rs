@@ -1137,6 +1137,39 @@ enum OobCommand {
         #[arg(long)]
         yes: bool,
     },
+
+    /// Inject a collaborator payload into a battery of request headers ("Collaborator
+    /// Everywhere") and poll for callbacks.
+    ///
+    /// Finds a blind server-side request forgery in a backend — a reverse proxy, an
+    /// analytics or link-preview service — that resolves or fetches a header the caller
+    /// controls (X-Forwarded-Host, Referer, X-Wap-Profile, …). Each header carries its own
+    /// token, so a callback names the one that reached out.
+    Headers {
+        /// The target URL.
+        url: String,
+        /// The collaborator authority (from `oob serve`).
+        #[arg(long, value_name = "AUTHORITY")]
+        server: String,
+        /// HTTP method (default GET).
+        #[arg(long, value_name = "METHOD")]
+        method: Option<String>,
+        /// Extra header to also send, `Name: value`. Repeatable.
+        #[arg(long = "header", value_name = "H")]
+        header: Vec<String>,
+        /// Seconds to wait for callbacks before polling.
+        #[arg(long, value_name = "SECS", default_value_t = 5)]
+        wait: u64,
+        /// Use `<token>.server` subdomain payloads (needs a wildcard-DNS collaborator).
+        #[arg(long)]
+        subdomain: bool,
+        /// Do not verify the target's TLS certificate.
+        #[arg(long)]
+        insecure: bool,
+        /// Do not ask before sending.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -2009,6 +2042,29 @@ fn run(cli: &Cli) -> nullhawk_types::Result<()> {
                 method: method.as_deref(),
                 headers: header,
                 wait: *wait,
+                insecure: *insecure,
+                yes: *yes,
+                json: cli.json,
+            })
+        }
+        Command::Oob(OobCommand::Headers {
+            url,
+            server,
+            method,
+            header,
+            wait,
+            subdomain,
+            insecure,
+            yes,
+        }) => {
+            license::gate().require(nullhawk_engine::license::Feature::ActiveScanner)?;
+            oob::headers_cmd(oob::HeadersArgs {
+                url,
+                server,
+                method: method.as_deref(),
+                headers: header,
+                wait: *wait,
+                subdomain: *subdomain,
                 insecure: *insecure,
                 yes: *yes,
                 json: cli.json,

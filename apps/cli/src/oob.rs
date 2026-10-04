@@ -260,6 +260,180 @@ pub fn test_cmd(args: TestArgs<'_>) -> Result<()> {
     Ok(())
 }
 
+/// Request headers a backend component tends to read as an address or URL, and so a
+/// place a server-side request can be forged by whoever sends the request. Ported from
+/// the "Collaborator Everywhere" idea: inject a callback payload into every one of these
+/// at once and let any backend that resolves or fetches one announce itself.
+const HEADER_BATTERY: &[&str] = &[
+    "Referer",
+    "X-Forwarded-For",
+    "X-Forwarded-Host",
+    "X-Forwarded-Server",
+    "X-Host",
+    "X-Real-IP",
+    "True-Client-IP",
+    "CF-Connecting-IP",
+    "Client-IP",
+    "X-Originating-IP",
+    "X-Client-IP",
+    "Forwarded",
+    "X-Wap-Profile",
+    "Profile",
+    "From",
+];
+
+/// Options for `nullhawk oob headers`.
+pub struct HeadersArgs<'a> {
+    /// The target URL.
+    pub url: &'a str,
+    /// The collaborator authority to mint payloads against and poll.
+    pub server: &'a str,
+    /// The method (default GET).
+    pub method: Option<&'a str>,
+    /// Extra headers to also send, `Name: value`.
+    pub headers: &'a [String],
+    /// Seconds to wait for callbacks before polling.
+    pub wait: u64,
+    /// Use `<token>.server` subdomain payloads (needs a wildcard-DNS collaborator);
+    /// catches a backend that only *resolves* a header, not just one that fetches a URL.
+    pub subdomain: bool,
+    /// Do not verify the target's TLS certificate.
+    pub insecure: bool,
+    /// Do not ask before sending.
+    pub yes: bool,
+    pub json: bool,
+}
+
+/// `nullhawk oob headers` — inject a collaborator payload into a battery of request
+/// headers and poll for callbacks ("Collaborator Everywhere").
+///
+/// Each header carries its own token in one request, so a callback names the header that
+/// reached a backend — a reverse proxy, an analytics or link-preview service, a WAF — that
+/// resolved or fetched a value the caller controls. That is a blind server-side request
+/// forgery the response never reveals; the collaborator is the only witness.
+pub fn headers_cmd(args: HeadersArgs<'_>) -> Result<()> {
+    let (service, path) = HttpService::parse_url(args.url)?;
+
+    if !args.json {
+        println!("Out-of-band header test (Collaborator Everywhere)");
+        println!(
+            "  target:       {} {}",
+            args.method.unwrap_or("GET"),
+            args.url
+        );
+        println!("  headers:      {} injected", HEADER_BATTERY.len());
+        println!("  collaborator: {}", args.server);
+        println!();
+        println!(
+            "This sends one request carrying a collaborator payload in {} headers. Only test \
+             systems you are authorized to test.",
+            HEADER_BATTERY.len()
+        );
+        if !args.yes && !crate::proxy::confirm("Send this probe?")? {
+            println!("Nothing was sent.");
+            return Ok(());
+        }
+    }
+    if args.json && !args.yes {
+        return Err(NullhawkError::invalid_input(
+            "--yes",
+            "an OOB test sends traffic, and --json cannot ask; pass --yes to confirm",
+        ));
+    }
+
+    let scope = Scope::new().include(ScopeRule::host(service.host.clone()));
+    let transport = if args.insecure {
+        TcpTransport::with_tls(TlsConfig::accept_any())
+    } else {
+        TcpTransport::new()
+    };
+    let guard = ScopeGuard::new(transport, Arc::new(scope));
+    let mode = if args.subdomain {
+        PayloadMode::Subdomain
+    } else {
+        PayloadMode::Path
+    };
+    let collaborator = Collaborator::new(args.server, mode);
+    let options = SendOptions::automated(Origin::Scanner);
+    let method = args.method.unwrap_or("GET").to_string();
+    let extra = parse_headers(args.headers)?;
+
+    let hits = runtime()?.block_on(async {
+        // One request, each battery header carrying its own token so a callback is
+        // attributable to the header that caused it.
+        let mut request = HttpRequest::get(service.clone(), path.clone());
+        request.method = method.clone();
+        for (name, value) in &extra {
+            request.headers.set(name, value.clone());
+        }
+        let mut probes: Vec<(String, String)> = Vec::new(); // (token, header)
+        for header in HEADER_BATTERY {
+            let (token, payload) = collaborator.mint();
+            request.headers.set(header, payload);
+            probes.push((token, (*header).to_string()));
+        }
+        // Blind: the response tells us nothing, so it is not read.
+        let _ = guard.send(request, options.clone()).await;
+
+        tokio::time::sleep(Duration::from_secs(args.wait)).await;
+
+        let mut hits: Vec<(String, Vec<nullhawk_oob::Interaction>)> = Vec::new();
+        for (token, header) in &probes {
+            let interactions = collaborator.poll(token).await.unwrap_or_default();
+            if !interactions.is_empty() {
+                hits.push((header.clone(), interactions));
+            }
+        }
+        hits
+    });
+
+    if args.json {
+        let payload = serde_json::json!({
+            "target": args.url,
+            "confirmed": !hits.is_empty(),
+            "headers": hits.iter().map(|(h, i)| serde_json::json!({
+                "header": h,
+                "interactions": i,
+            })).collect::<Vec<_>>(),
+        });
+        println!("{payload}");
+        return Ok(());
+    }
+
+    println!();
+    if hits.is_empty() {
+        println!(
+            "No out-of-band interactions. None of the {} injected header(s) caused a callback",
+            HEADER_BATTERY.len()
+        );
+        println!(
+            "within {}s. That is not proof of safety — a backend may call back more slowly, or",
+            args.wait
+        );
+        println!("only resolve DNS: re-run with --subdomain against a wildcard-DNS collaborator.");
+    } else {
+        println!("OUT-OF-BAND INTERACTION CONFIRMED ({}):", hits.len());
+        for (header, interactions) in &hits {
+            println!("  header `{header}` — a backend reached the collaborator:");
+            for interaction in interactions {
+                println!(
+                    "    {} {} {} from {} at {}",
+                    interaction.protocol.to_uppercase(),
+                    interaction.method,
+                    interaction.path,
+                    interaction.source,
+                    interaction.at,
+                );
+            }
+        }
+        println!();
+        println!("A backend used a header value the caller controls to reach a server it does");
+        println!("not control — a blind server-side request forgery. The response never showed");
+        println!("it; the callback is the proof. Confirm which component by the source address.");
+    }
+    Ok(())
+}
+
 /// The names of the query parameters in a request target.
 fn query_params(path: &str) -> Vec<String> {
     let Some((_, query)) = path.split_once('?') else {

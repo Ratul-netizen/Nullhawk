@@ -29,6 +29,7 @@ mod history;
 mod identifiers;
 mod identity;
 mod import;
+mod jwt;
 mod license;
 mod llm;
 mod matchreplace;
@@ -851,6 +852,10 @@ enum Command {
     #[command(subcommand)]
     Oob(OobCommand),
 
+    /// Read a JSON Web Token, and forge the variants that test whether a server verifies one.
+    #[command(subcommand)]
+    Jwt(JwtCommand),
+
     /// Test an LLM-backed endpoint for prompt injection.
     ///
     /// Sends injection probes that instruct the model to emit a random token; if the token
@@ -1000,6 +1005,55 @@ enum LicenseCommand {
         /// Where to write the licence. Printed to stdout when omitted.
         #[arg(long, value_name = "PATH")]
         out: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum JwtCommand {
+    /// Decode a token's header and payload and show what it claims.
+    ///
+    /// Reads base64url; nothing is decrypted and no signature is checked. Flags an
+    /// unsigned token and prints the stated subject and lifetime.
+    Decode {
+        /// The token, with or without a `Bearer ` prefix.
+        token: String,
+    },
+
+    /// Emit a tampered token for testing whether the server verifies signatures.
+    ///
+    /// Change claims with --set, then pick exactly one signing mode: --alg-none (drop
+    /// the signature and claim `alg: none`), --sign-hs256-env/--sign-hs256-file
+    /// (re-sign HS256 with a guessed secret or an RS256 public key for key confusion),
+    /// or --strip-signature. Send the result as the identity and compare with the
+    /// original to see whether it was accepted.
+    Forge {
+        /// The token to base the forgery on.
+        token: String,
+
+        /// Set a top-level claim: `key=value`. Repeatable. The value is read as JSON
+        /// when it parses as one (`admin=true`, `uid=5`), otherwise as a string.
+        #[arg(long = "set", value_name = "KEY=VALUE")]
+        set: Vec<String>,
+
+        /// Claim `alg: none` and drop the signature.
+        #[arg(long)]
+        alg_none: bool,
+
+        /// The casing of the `none` value, for verifiers that only reject one spelling.
+        #[arg(long, value_name = "CASING", default_value = "none")]
+        none_casing: String,
+
+        /// Re-sign HS256 with the secret in this environment variable.
+        #[arg(long, value_name = "VAR")]
+        sign_hs256_env: Option<String>,
+
+        /// Re-sign HS256 with the key bytes in this file (e.g. an RS256 public key).
+        #[arg(long, value_name = "PATH")]
+        sign_hs256_file: Option<PathBuf>,
+
+        /// Keep the header's algorithm but remove the signature.
+        #[arg(long)]
+        strip_signature: bool,
     },
 }
 
@@ -1941,6 +1995,28 @@ fn run(cli: &Cli) -> nullhawk_types::Result<()> {
                 json: cli.json,
             })
         }
+        Command::Jwt(JwtCommand::Decode { token }) => jwt::decode(jwt::DecodeArgs {
+            token,
+            json: cli.json,
+        }),
+        Command::Jwt(JwtCommand::Forge {
+            token,
+            set,
+            alg_none,
+            none_casing,
+            sign_hs256_env,
+            sign_hs256_file,
+            strip_signature,
+        }) => jwt::forge(jwt::ForgeArgs {
+            token,
+            set,
+            alg_none: *alg_none,
+            none_casing,
+            sign_env: sign_hs256_env.as_deref(),
+            sign_file: sign_hs256_file.as_deref(),
+            strip: *strip_signature,
+            json: cli.json,
+        }),
         Command::Llm {
             url,
             template,

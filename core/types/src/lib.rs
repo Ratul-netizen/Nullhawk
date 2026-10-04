@@ -47,6 +47,7 @@ pub mod http;
 pub mod identity;
 pub mod ids;
 pub mod inject;
+pub mod jwt;
 pub mod limits;
 pub mod matchreplace;
 pub mod object;

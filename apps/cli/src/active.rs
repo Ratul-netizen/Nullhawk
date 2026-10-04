@@ -74,6 +74,41 @@ fn refresh_sessions(project: &nullhawk_storage::Project) -> Result<()> {
     Ok(())
 }
 
+/// Replays each identity's recorded login to mint a fresh session before the run.
+///
+/// Best-effort and never fatal: an identity with no recorded login is skipped silently
+/// (most are), and one whose login cannot be replayed is reported as a warning while the
+/// run goes on with the credential it already had. Only identities that `browse
+/// --record-login` gave a login to can renew — the rest simply have nothing to replay.
+fn renew_sessions(project: &nullhawk_storage::Project, insecure: bool, json: bool) {
+    let identities = match project.identities().list() {
+        Ok(identities) => identities,
+        Err(_) => return,
+    };
+    for identity in identities {
+        if identity.login_request.is_none() {
+            continue;
+        }
+        match crate::identity::renew_via_recorded_login(project, &identity, insecure) {
+            Ok(status) if !json => {
+                println!(
+                    "Renewed {}'s session by replaying its recorded login (status {status}); the \
+                     token is not printed.",
+                    identity.label
+                );
+            }
+            Ok(_) => {}
+            Err(why) if !json => {
+                println!(
+                    "Could not renew {}: {why}. The run continues with its current session.",
+                    identity.label
+                );
+            }
+            Err(_) => {}
+        }
+    }
+}
+
 /// How many recent exchanges `--refresh` reads looking for a newer session.
 const REFRESH_SAMPLE: usize = 500;
 
@@ -100,6 +135,9 @@ pub struct Args<'a> {
     pub no_save: bool,
     /// Adopt the freshest session from proxy traffic before planning.
     pub refresh: bool,
+    /// Replay each identity's recorded login before planning, to mint a fresh session —
+    /// for when there is no newer traffic to adopt and the captured session has expired.
+    pub renew: bool,
     /// An out-of-band collaborator authority, for confirming blind vulnerabilities.
     pub collaborator: Option<&'a str>,
     /// Embed the collaborator token as a subdomain rather than a path.
@@ -167,6 +205,17 @@ pub fn active(args: Args<'_>) -> Result<()> {
     // recorded is the cheapest minute of the run — it sends nothing.
     if args.refresh {
         refresh_sessions(&project)?;
+    }
+
+    // `--renew` goes further than `--refresh`: where refresh adopts a session a browser
+    // already sent, renew replays each identity's recorded login to mint a new one — the
+    // case where the captured session has expired and no fresher traffic exists to adopt.
+    // Best-effort: a login that cannot be replayed leaves that identity as it was and the
+    // run proceeds (and may still stop on expiry, as before), rather than failing here.
+    if args.renew && !args.dry_run {
+        // Not under --dry-run: replaying a login sends a request, and a dry run sends
+        // nothing. Renew for real, or with --dry-run to only see the plan.
+        renew_sessions(&project, args.insecure, args.json);
     }
 
     let mut checks = nullhawk_active::active_checks();

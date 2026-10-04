@@ -1550,6 +1550,16 @@ enum ScanCommand {
         #[arg(long)]
         refresh: bool,
 
+        /// Replay each identity's recorded login before the run, to mint a fresh session.
+        ///
+        /// Goes further than --refresh: where refresh adopts a session a browser already
+        /// sent, this re-runs the login `browse --record-login` recorded and takes the new
+        /// session from its response — for when the captured session has expired and there
+        /// is no newer traffic to adopt. Best-effort: an identity with no recorded login is
+        /// left as it was, and the run proceeds.
+        #[arg(long)]
+        renew: bool,
+
         /// An out-of-band collaborator authority (host or host:port) to confirm blind
         /// vulnerabilities by their callbacks. Run one with `nullhawk oob serve`.
         ///
@@ -2477,6 +2487,7 @@ fn run(cli: &Cli) -> nullhawk_types::Result<()> {
             insecure,
             no_save,
             refresh,
+            renew,
             collaborator,
             collaborator_subdomain,
             quiet,
@@ -2494,6 +2505,7 @@ fn run(cli: &Cli) -> nullhawk_types::Result<()> {
                 insecure: *insecure,
                 no_save: *no_save,
                 refresh: *refresh,
+                renew: *renew,
                 collaborator: collaborator.as_deref(),
                 collaborator_subdomain: *collaborator_subdomain,
                 quiet: *quiet,

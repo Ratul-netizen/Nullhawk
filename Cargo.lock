@@ -2359,6 +2359,7 @@ dependencies = [
  "nullhawk-types",
  "nullhawk-verify",
  "nullhawk-wasm",
+ "regex",
  "serde",
  "serde_json",
  "serde_yaml_ng",

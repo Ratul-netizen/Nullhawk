@@ -631,6 +631,75 @@ pub fn renew(args: RenewArgs<'_>) -> Result<()> {
     Ok(())
 }
 
+/// Replays an identity's recorded login and stores the fresh session it returns, reading
+/// the new token from the identity's first recorded session cookie. The automatic path
+/// `renew` exposes with flags — factored out so an active scan can refresh an identity
+/// before it replays as it, rather than aborting when the captured session has expired.
+///
+/// Returns the status the login answered with. The token is neither returned nor printed.
+/// Errors when the identity has no recorded login, no session cookie, or no renewable
+/// credential — the caller decides whether that is fatal (for a scan it is not: the run
+/// proceeds with the credential it has).
+pub fn renew_via_recorded_login(
+    project: &nullhawk_storage::Project,
+    identity: &nullhawk_types::identity::Identity,
+    insecure: bool,
+) -> Result<u16> {
+    let kind = credential_kind_key(&identity.credential)?;
+    let request_id = identity.login_request.ok_or_else(|| {
+        NullhawkError::invalid_input(
+            "login",
+            format!("{} has no recorded login to replay", identity.label),
+        )
+    })?;
+    let cookie = identity.session_cookies.first().cloned().ok_or_else(|| {
+        NullhawkError::invalid_input(
+            "login",
+            format!(
+                "{} has no recorded session cookie to read a fresh token from",
+                identity.label
+            ),
+        )
+    })?;
+
+    let transport = if insecure {
+        TcpTransport::with_tls(TlsConfig::accept_any())
+    } else {
+        TcpTransport::new()
+    };
+    let scope = Arc::new(project.settings().scope()?);
+    let store = Arc::new(project.traffic());
+    let repeater = Repeater::new(ScopeGuard::new(transport, scope), store)
+        .attaching(project.settings().attached_headers()?);
+    let draft = repeater.draft_from(request_id)?;
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| NullhawkError::Internal(format!("failed to start the async runtime: {e}")))?;
+    let sent = runtime.block_on(repeater.send_as(&draft, SendAs::repeater()))?;
+    let response = &sent.exchange.response;
+
+    let value = cookie_value(&response.headers, &cookie).ok_or_else(|| {
+        NullhawkError::invalid_input(
+            "login",
+            format!(
+                "replaying {}'s login set no `{cookie}` cookie (status {}), so there is no fresh \
+                 session to adopt",
+                identity.label, response.status
+            ),
+        )
+    })?;
+    let new_value = match kind.as_str() {
+        "cookie" => format!("{cookie}={value}"),
+        _ => value,
+    };
+    let mut updated = identity.clone();
+    updated.credential = build_credential(&kind, new_value)?;
+    project.identities().put(&updated)?;
+    Ok(response.status)
+}
+
 /// The credential kind key for `build_credential`, or an error when there is no session to renew.
 fn credential_kind_key(credential: &Credential) -> Result<String> {
     match credential {
@@ -728,6 +797,23 @@ mod tests {
         assert_eq!(json_field(body, "n"), Some("42".to_string()));
         assert_eq!(json_field(body, "data.missing"), None);
         assert_eq!(json_field(b"not json", "x"), None);
+    }
+
+    #[test]
+    fn renew_via_recorded_login_refuses_before_sending_when_there_is_nothing_to_replay() {
+        let project = nullhawk_storage::Project::in_memory().unwrap();
+        // Anonymous: no session to renew — refused by the credential kind, before any send.
+        let anon = nullhawk_types::identity::Identity::anonymous();
+        assert!(renew_via_recorded_login(&project, &anon, false).is_err());
+        // A cookie identity with no recorded login: refused for want of a login to replay.
+        let mut cookie = nullhawk_types::identity::Identity::anonymous();
+        cookie.credential = Credential::Cookie {
+            value: "session=abc".to_string().into(),
+        };
+        cookie.session_cookies = vec!["session".to_string()];
+        assert!(cookie.login_request.is_none());
+        let err = renew_via_recorded_login(&project, &cookie, false).unwrap_err();
+        assert!(format!("{err}").contains("recorded login"), "{err}");
     }
 
     #[test]

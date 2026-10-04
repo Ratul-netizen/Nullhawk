@@ -139,10 +139,11 @@ impl StoppedBecause {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::CredentialExpired => {
-                "the session being replayed expired while the run was working, so the \
-                 experiments after that point could not have established anything and \
-                 were not attempted. Browse the application logged in, then `nullhawk \
-                 identity refresh`, and run it again"
+                "the session being replayed stopped being accepted while the run was \
+                 working — its stated lifetime passed, or it began answering 401 — so the \
+                 experiments after that point could not have established anything and were \
+                 not attempted. Re-run with --renew to replay the recorded login and resume, \
+                 or refresh the session and run it again"
             }
             Self::Cancelled => {
                 "the run was stopped before it finished, so the experiments it had not \
@@ -568,6 +569,7 @@ async fn run_recording(
         .collect();
 
     let spend = RequestCeiling::new(plan.budget.max_requests);
+    let health = SessionHealth::new();
     let queues = plan.by_host();
 
     // One future per host, a bounded number driven at a time. Within a future the
@@ -591,7 +593,12 @@ async fn run_recording(
                 if expired_now(&plan.programme_identities) {
                     break;
                 }
-                done.push(one(subject, lab, checks, &plan.budget, &spend, cancel).await);
+                // The opaque counterpart to the expiry check above: a cookie that is not a
+                // JWT says nothing about its lifetime, but a run of `401`s says it is dead.
+                if health.looks_dead() {
+                    break;
+                }
+                done.push(one(subject, lab, checks, &plan.budget, &spend, cancel, &health).await);
                 // Between experiments as well as within them: two experiments against
                 // the same host back to back is the same burst the pause exists to
                 // prevent.
@@ -623,10 +630,13 @@ async fn run_recording(
 
     let stopped = if cancel.stopped() {
         Some(StoppedBecause::Cancelled)
-    } else if judged.len() < plan.work.len() && expired_now(&plan.programme_identities) {
+    } else if judged.len() < plan.work.len()
+        && (expired_now(&plan.programme_identities) || health.looks_dead())
+    {
         // Asked before the ceiling, because when both are true this is the one that
         // explains the result: a run held back by its budget had more to do, and a run
-        // whose session died could not have done it.
+        // whose session died could not have done it. Either the credential said it had
+        // expired (a JWT's `exp`), or the responses said so (a run of `401`s).
         Some(StoppedBecause::CredentialExpired)
     } else if judged.len() < plan.work.len() {
         // The only other way to leave work undone. Reported even though the run
@@ -694,6 +704,7 @@ async fn one(
     budget: &Budget,
     spend: &RequestCeiling,
     cancel: &Cancel,
+    health: &SessionHealth,
 ) -> Worked {
     let check = checks
         .iter()
@@ -704,6 +715,7 @@ async fn one(
         inner: lab,
         spend,
         cancel,
+        health,
     };
 
     let verification = match check.settle(subject, &metered, budget).await {
@@ -739,6 +751,7 @@ struct Metered<'a> {
     inner: &'a dyn Lab,
     spend: &'a RequestCeiling,
     cancel: &'a Cancel,
+    health: &'a SessionHealth,
 }
 
 #[async_trait::async_trait]
@@ -769,7 +782,11 @@ impl Lab for Metered<'_> {
                 "the target left the project's scope before this request was sent",
             ));
         }
-        self.inner.experiment(draft, as_identity).await
+        let sent = self.inner.experiment(draft, as_identity).await?;
+        // Watch the responses for a session that has stopped being accepted. A dead opaque
+        // cookie cannot be seen by `expired_now`, but it answers `401` to everything.
+        self.health.note(sent.exchange.response.status);
+        Ok(sent)
     }
 
     fn would_leave_scope(
@@ -853,6 +870,43 @@ impl RequestCeiling {
     }
 }
 
+/// How many `401`s in a row the run has seen means the session it is replaying has died.
+///
+/// Opaque session tokens — a cookie that is not a JWT — say nothing about their own
+/// lifetime, so [`expired_now`] cannot see them go. What a dead session does say is `401`,
+/// to everything. A live session does not: its requests come back `2xx`, and even
+/// `auth.enforcement`, which deliberately sends unauthenticated probes, sends an
+/// authenticated baseline between them — so any single `2xx` resets the count, and only a
+/// session that has genuinely stopped being accepted drives it up. `403` is excluded: it
+/// is forbidden-this-resource, not unauthenticated, and far more often a real per-resource
+/// answer than a dead session.
+const CONSECUTIVE_UNAUTHORIZED_IS_DEAD: usize = 8;
+
+struct SessionHealth {
+    consecutive_unauthorized: std::sync::atomic::AtomicUsize,
+}
+
+impl SessionHealth {
+    fn new() -> Self {
+        Self {
+            consecutive_unauthorized: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// Records one response's status: a `401` climbs the count, anything else resets it.
+    fn note(&self, status: u16) {
+        if status == 401 {
+            self.consecutive_unauthorized.fetch_add(1, Ordering::SeqCst);
+        } else {
+            self.consecutive_unauthorized.store(0, Ordering::SeqCst);
+        }
+    }
+
+    fn looks_dead(&self) -> bool {
+        self.consecutive_unauthorized.load(Ordering::SeqCst) >= CONSECUTIVE_UNAUTHORIZED_IS_DEAD
+    }
+}
+
 async fn pause(duration: Duration) {
     if duration.is_zero() {
         return;
@@ -863,6 +917,33 @@ async fn pause(duration: Duration) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_session_looks_dead_after_a_run_of_401s_and_a_single_2xx_resets_it() {
+        let health = SessionHealth::new();
+        // One short of the limit is not yet a dead session.
+        for _ in 0..CONSECUTIVE_UNAUTHORIZED_IS_DEAD - 1 {
+            health.note(401);
+        }
+        assert!(!health.looks_dead());
+        // A live response anywhere in the run resets the count — this is what stops a
+        // check that sends an unauthenticated probe (and an authenticated baseline) from
+        // reading as a dead session.
+        health.note(200);
+        for _ in 0..CONSECUTIVE_UNAUTHORIZED_IS_DEAD - 1 {
+            health.note(401);
+        }
+        assert!(!health.looks_dead(), "a 2xx must reset the run of 401s");
+        // Only an unbroken run reaches the threshold.
+        health.note(401);
+        assert!(health.looks_dead());
+        // A 403 is forbidden-this-resource, not unauthenticated, so it does not count.
+        let forbidden = SessionHealth::new();
+        for _ in 0..CONSECUTIVE_UNAUTHORIZED_IS_DEAD + 2 {
+            forbidden.note(403);
+        }
+        assert!(!forbidden.looks_dead());
+    }
 
     #[test]
     fn the_ceiling_stops_at_exactly_the_number_it_was_given() {
@@ -926,10 +1007,12 @@ mod tests {
 
         let ceiling = RequestCeiling::new(10);
         let cancel = Cancel::new();
+        let health = SessionHealth::new();
         let metered = Metered {
             inner: &WithCanary,
             spend: &ceiling,
             cancel: &cancel,
+            health: &health,
         };
 
         let canary = metered

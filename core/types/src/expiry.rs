@@ -114,7 +114,7 @@ fn claims(token: &str) -> Option<serde_json::Value> {
     if signature.is_empty() || parts.next().is_some() {
         return None;
     }
-    serde_json::from_slice(&base64url(payload)?).ok()
+    serde_json::from_slice(&crate::jwt::base64url_decode(payload)?).ok()
 }
 
 /// The lifetime a bearer token states, if it states one.
@@ -129,34 +129,6 @@ pub fn of_jwt(token: &str) -> Option<Lifetime> {
         expires_at,
         issued_at: claims.get("iat").and_then(serde_json::Value::as_i64),
     })
-}
-
-/// Decodes unpadded base64url, which is how a JWT writes its parts.
-fn base64url(input: &str) -> Option<Vec<u8>> {
-    let mut out = Vec::with_capacity(input.len() * 3 / 4);
-    let mut buffer = 0u32;
-    let mut bits = 0u32;
-
-    for byte in input.bytes() {
-        let value = match byte {
-            b'A'..=b'Z' => byte - b'A',
-            b'a'..=b'z' => byte - b'a' + 26,
-            b'0'..=b'9' => byte - b'0' + 52,
-            b'-' => 62,
-            b'_' => 63,
-            // Padding is not part of base64url and a JWT never writes it, but a value
-            // copied through something that added it should still read.
-            b'=' => continue,
-            _ => return None,
-        };
-        buffer = (buffer << 6) | u32::from(value);
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((buffer >> bits) as u8);
-        }
-    }
-    Some(out)
 }
 
 #[cfg(test)]

@@ -31,11 +31,11 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use nullhawk_active::{Budget, Cancel, Outcome, Plan};
+use nullhawk_active::{ActiveCheck, Budget, Cancel, Outcome, Plan, StoppedBecause};
 use nullhawk_engine::guard::ScopeGuard;
 use nullhawk_http::{TcpTransport, TlsConfig};
 use nullhawk_repeater::Repeater;
-use nullhawk_storage::Recorded;
+use nullhawk_storage::{DetectorRun, Recorded};
 use nullhawk_types::verify::Verification;
 use nullhawk_types::{NullhawkError, Result};
 use nullhawk_verify::RepeaterLab;
@@ -80,24 +80,27 @@ fn refresh_sessions(project: &nullhawk_storage::Project) -> Result<()> {
 /// (most are), and one whose login cannot be replayed is reported as a warning while the
 /// run goes on with the credential it already had. Only identities that `browse
 /// --record-login` gave a login to can renew — the rest simply have nothing to replay.
-fn renew_sessions(project: &nullhawk_storage::Project, insecure: bool, json: bool) {
+fn renew_sessions(project: &nullhawk_storage::Project, insecure: bool, json: bool) -> usize {
     let identities = match project.identities().list() {
         Ok(identities) => identities,
-        Err(_) => return,
+        Err(_) => return 0,
     };
+    let mut renewed = 0;
     for identity in identities {
         if identity.login_request.is_none() {
             continue;
         }
         match crate::identity::renew_via_recorded_login(project, &identity, insecure) {
-            Ok(status) if !json => {
-                println!(
-                    "Renewed {}'s session by replaying its recorded login (status {status}); the \
-                     token is not printed.",
-                    identity.label
-                );
+            Ok(status) => {
+                renewed += 1;
+                if !json {
+                    println!(
+                        "Renewed {}'s session by replaying its recorded login (status {status}); \
+                         the token is not printed.",
+                        identity.label
+                    );
+                }
             }
-            Ok(_) => {}
             Err(why) if !json => {
                 println!(
                     "Could not renew {}: {why}. The run continues with its current session.",
@@ -105,6 +108,25 @@ fn renew_sessions(project: &nullhawk_storage::Project, insecure: bool, json: boo
                 );
             }
             Err(_) => {}
+        }
+    }
+    renewed
+}
+
+/// Whether `--detector` keeps this hypothesis: no filter keeps all, otherwise a hypothesis
+/// is kept when the named detector raised it (its own id) or settles it (the check's id).
+fn detector_keeps(
+    detector: Option<&str>,
+    checks: &[Box<dyn ActiveCheck>],
+    hypothesis: &nullhawk_types::finding::Hypothesis,
+) -> bool {
+    match detector {
+        None => true,
+        Some(detector) => {
+            hypothesis.detector == detector
+                || checks.iter().any(|check| {
+                    check.about().id.to_string() == detector && check.handles(hypothesis)
+                })
         }
     }
 }
@@ -233,18 +255,10 @@ pub fn active(args: Args<'_>) -> Result<()> {
     // the queue to spend the budget before the asked-for one was reached. A hypothesis is
     // kept when the named detector is the one that raised it (its own id) or the one that
     // settles it (the check's id) — the two differ for some checks.
-    let hypotheses = match args.detector {
-        Some(detector) => hypotheses
-            .into_iter()
-            .filter(|hypothesis| {
-                hypothesis.detector == detector
-                    || checks.iter().any(|check| {
-                        check.about().id.to_string() == detector && check.handles(hypothesis)
-                    })
-            })
-            .collect(),
-        None => hypotheses,
-    };
+    let hypotheses: Vec<_> = hypotheses
+        .into_iter()
+        .filter(|hypothesis| detector_keeps(args.detector, &checks, hypothesis))
+        .collect();
 
     let plan = Plan::prepare(&project, &lab, &checks, &hypotheses, &budget)?;
 
@@ -288,7 +302,113 @@ pub fn active(args: Args<'_>) -> Result<()> {
         .map_err(|e| NullhawkError::Internal(format!("failed to start the async runtime: {e}")))?;
 
     let cancel = Cancel::new();
-    let outcome = runtime.block_on(stoppable(&plan, &lab, &checks, &cancel, &project))?;
+
+    // Run, and — with --renew — resume. If a pass stops because the session expired, replay
+    // the recorded login to mint a fresh one and run the work left over, up to a few times
+    // and within the remaining request budget. Renewal happens *between* passes, single-
+    // threaded, so nothing mutates a queue while it drains; the passes are merged into one
+    // outcome for the report. `planned` is accumulated across passes so the "not reached"
+    // label still means what it says.
+    const MAX_RESUMES: usize = 5;
+    let mut plan = plan;
+    let mut budget = budget;
+    let mut planned: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut merged_judged = Vec::new();
+    let mut merged_detectors: std::collections::BTreeMap<String, DetectorRun> =
+        std::collections::BTreeMap::new();
+    let mut done: std::collections::HashSet<(String, String, String)> =
+        std::collections::HashSet::new();
+    let mut requests_sent = 0usize;
+    // Assigned from each pass before any break, so they hold the last pass's values.
+    let mut skipped;
+    let mut run_record;
+    let mut stopped;
+    let mut resumes = 0usize;
+
+    loop {
+        for subject in &plan.work {
+            if let Some(check) = checks.iter().find(|c| c.handles(&subject.hypothesis)) {
+                *planned.entry(check.about().id.to_string()).or_insert(0) += 1;
+            }
+        }
+
+        let pass = runtime.block_on(stoppable(&plan, &lab, &checks, &cancel, &project))?;
+        requests_sent += pass.requests_sent;
+        stopped = pass.stopped;
+        skipped = pass.skipped;
+        run_record = pass.run;
+        for detector in pass.detectors {
+            let entry = merged_detectors
+                .entry(detector.detector.clone())
+                .or_insert_with(|| DetectorRun {
+                    hypotheses: 0,
+                    reportable: 0,
+                    observations: 0,
+                    ..detector.clone()
+                });
+            entry.hypotheses += detector.hypotheses;
+            entry.reportable += detector.reportable;
+            entry.observations += detector.observations;
+        }
+        for judged in pass.judged {
+            let key = (
+                judged.hypothesis.detector.clone(),
+                judged.hypothesis.claim.clone(),
+                judged.hypothesis.source_request.to_string(),
+            );
+            if done.insert(key) {
+                merged_judged.push(judged);
+            }
+        }
+
+        if stopped != Some(StoppedBecause::CredentialExpired)
+            || !args.renew
+            || resumes >= MAX_RESUMES
+        {
+            break;
+        }
+        let remaining = budget.max_requests.saturating_sub(requests_sent);
+        if remaining == 0 {
+            break;
+        }
+        if !args.json {
+            println!("\nThe session expired mid-run. Renewing and resuming the work left...");
+        }
+        if renew_sessions(&project, args.insecure, args.json) == 0 {
+            break;
+        }
+        resumes += 1;
+        let standing = nullhawk_active::standing(&project, &selection(&args))?;
+        let left: Vec<_> = standing
+            .hypotheses
+            .into_iter()
+            .filter(|h| detector_keeps(args.detector, &checks, h))
+            .filter(|h| {
+                !done.contains(&(
+                    h.detector.clone(),
+                    h.claim.clone(),
+                    h.source_request.to_string(),
+                ))
+            })
+            .collect();
+        if left.is_empty() {
+            break;
+        }
+        budget.max_requests = remaining;
+        plan = Plan::prepare(&project, &lab, &checks, &left, &budget)?;
+        if plan.work.is_empty() {
+            break;
+        }
+    }
+
+    let outcome = Outcome {
+        run: run_record,
+        judged: merged_judged,
+        skipped,
+        requests_sent,
+        stopped,
+        detectors: merged_detectors.into_values().collect(),
+    };
 
     let saved = if args.no_save {
         Vec::new()
@@ -300,15 +420,6 @@ pub fn active(args: Args<'_>) -> Result<()> {
         }
         saved
     };
-
-    // How many experiments each check had queued, so the summary can tell a check that
-    // was reached and settled nothing from one the run never got to before its ceiling.
-    let mut planned: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-    for subject in &plan.work {
-        if let Some(check) = checks.iter().find(|c| c.handles(&subject.hypothesis)) {
-            *planned.entry(check.about().id.to_string()).or_insert(0) += 1;
-        }
-    }
 
     if args.json {
         print_json(&outcome, &saved);

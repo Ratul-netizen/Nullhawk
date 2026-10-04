@@ -102,6 +102,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "identity_login_request",
         sql: include_str!("../migrations/0015_identity_login_request.sql"),
     },
+    Migration {
+        version: 16,
+        name: "stopped_credential_expired",
+        sql: include_str!("../migrations/0016_stopped_credential_expired.sql"),
+    },
 ];
 
 /// The schema version this build expects.
@@ -196,6 +201,33 @@ mod tests {
             target_version(),
             "re-running migrations must be a no-op"
         );
+    }
+
+    #[test]
+    fn a_credential_expired_run_with_an_excluded_detector_can_be_recorded() {
+        // The 0016 rebuild exists so a run that stopped because its session expired can be
+        // written at all; the earlier CHECK allowed only 'cancelled'/'ceiling'. This also
+        // guards the rebuild against dropping `scan_run_detectors.excluded_reason` (added
+        // in 0010) — an empty-database migration test cannot catch a lost column, but a row
+        // that uses it can.
+        let mut conn = memory_db();
+        migrate(&mut conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO scan_runs (id, started_at, status, tool_version, stopped_because)
+             VALUES ('run_1', '2026-01-01T00:00:00Z', 'completed', '0.0.0', 'credential_expired');
+             INSERT INTO scan_run_detectors
+                 (run_id, detector_id, detector_version, mode, excluded_reason)
+             VALUES ('run_1', 'input.sqli', '1.0.0', 'active', 'programme excludes it');",
+        )
+        .expect("a credential_expired run and an excluded detector must be recordable");
+        let stopped: String = conn
+            .query_row(
+                "SELECT stopped_because FROM scan_runs WHERE id = 'run_1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stopped, "credential_expired");
     }
 
     #[test]

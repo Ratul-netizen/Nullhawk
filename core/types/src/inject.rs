@@ -489,7 +489,34 @@ fn encode_path_segment(value: &str) -> String {
 /// Encodes a value so it stays inside one query parameter.
 fn encode_query_value(value: &str) -> String {
     encode(value, |byte| {
-        matches!(byte, b'&' | b'#' | b'?' | b' ' | b'+')
+        // Percent-encode every byte that may not appear literally in a URI query
+        // component (RFC 3986 `query` = pchar / "/" / "?"), keeping only the
+        // unreserved characters and the sub-delims that are not our own delimiters.
+        // `&`, `+`, `#`, `?` and space are therefore encoded, and so are the
+        // URI-illegal bytes a payload often carries — `<`, `>`, `"`, backtick,
+        // control bytes, non-ASCII — which the strict URL parser would otherwise
+        // reject before the request is ever sent. A server decodes the escape back
+        // to the original byte, so encoding more than the minimum is always safe:
+        // an injected `'` still reaches a SQL sink, a `<` still reaches an HTML one.
+        !(byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'-' | b'.'
+                    | b'_'
+                    | b'~'
+                    | b'!'
+                    | b'$'
+                    | b'\''
+                    | b'('
+                    | b')'
+                    | b'*'
+                    | b','
+                    | b';'
+                    | b'='
+                    | b':'
+                    | b'@'
+                    | b'/'
+            ))
     })
 }
 
@@ -659,12 +686,22 @@ mod tests {
 
         let built = substitute(&request, &location, "hxa<\">hxb").unwrap();
         assert!(built.path.starts_with("/search?q="), "{}", built.path);
-        // Sent as itself rather than percent-encoded. A query value may legally carry
-        // these bytes, and encoding them would test the server's decoder instead of
-        // what it does with the value once it has one.
+        // The URI-illegal bytes (`<`, `>`, `"`) are percent-encoded, not spliced in raw.
+        // RFC 3986 forbids them in a query, so a raw splice produces a URL the transport
+        // rejects before it is ever sent — the probe would then test nothing at all. A
+        // server decodes `%3C` back to `<` before the value reaches application code, so
+        // the reflection check sees the same thing while the request stays well-formed.
         assert!(
-            built.path.contains("hxa<\">hxb"),
-            "the marker did not survive into the request: {}",
+            built.path.contains("hxa%3C%22%3Ehxb"),
+            "URI-illegal marker bytes were not encoded into the request: {}",
+            built.path
+        );
+        // Legal sub-delims a query may carry stay literal: encoding them would not
+        // change what the server receives and only makes the request harder to read.
+        let built = substitute(&request, &location, "a'(b)*c").unwrap();
+        assert!(
+            built.path.contains("a'(b)*c"),
+            "legal sub-delims were needlessly encoded: {}",
             built.path
         );
 

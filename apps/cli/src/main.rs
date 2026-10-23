@@ -59,6 +59,7 @@ mod sequencer;
 mod setup;
 mod sitemap;
 mod snapshot;
+mod surface;
 mod upload;
 mod ws;
 mod xxe;
@@ -914,6 +915,21 @@ enum Command {
         /// Do not ask before running.
         #[arg(long)]
         yes: bool,
+    },
+
+    /// Map the input surface: the parameters, per endpoint, the captured requests carried.
+    ///
+    /// Reads the requests already in the project — it sends nothing — groups them by host and
+    /// by a templated path (so `/users/1` and `/users/2` are one `/users/{id}`), and lists the
+    /// query parameters, body fields, cookies and dynamic path segments seen at each. The
+    /// checklist a test works from, and what the fuzzer and active scan draw their work from.
+    Surface {
+        /// Project directory.
+        path: PathBuf,
+
+        /// Only requests to this host (bare host or host:port).
+        #[arg(long, value_name = "HOST")]
+        host: Option<String>,
     },
 
     /// Name the stack behind each host from the captured headers, cookies and generator tags.
@@ -2325,6 +2341,11 @@ fn run(cli: &Cli) -> nullhawk_types::Result<()> {
             json: cli.json,
         }),
         Command::Retire { path, host } => retire::run(retire::Args {
+            project: path.clone(),
+            host: host.clone(),
+            json: cli.json,
+        }),
+        Command::Surface { path, host } => surface::run(surface::Args {
             project: path.clone(),
             host: host.clone(),
             json: cli.json,

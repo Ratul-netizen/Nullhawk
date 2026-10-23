@@ -24,6 +24,7 @@ mod domxss;
 mod ext;
 mod findings;
 mod fuzz;
+mod graphql;
 mod header;
 mod history;
 mod identifiers;
@@ -890,6 +891,32 @@ enum Command {
         /// Only scripts served by this host (bare host or host:port).
         #[arg(long, value_name = "HOST")]
         host: Option<String>,
+    },
+
+    /// Test a GraphQL endpoint for schema exposure (introspection, field suggestions).
+    ///
+    /// Sends an introspection query and a mistyped-field query (reads, not mutations) and
+    /// reports whether the endpoint hands back its schema or leaks field names. Point it
+    /// only at an endpoint you are authorized to test.
+    Graphql {
+        /// The GraphQL endpoint URL.
+        url: String,
+
+        /// HTTP method (default POST).
+        #[arg(long, value_name = "METHOD")]
+        method: Option<String>,
+
+        /// Extra header, `Name: value`. Repeatable (e.g. an Authorization bearer).
+        #[arg(long = "header", value_name = "H")]
+        header: Vec<String>,
+
+        /// Do not verify the target's TLS certificate.
+        #[arg(long)]
+        insecure: bool,
+
+        /// Do not ask before sending.
+        #[arg(long)]
+        yes: bool,
     },
 
     /// Test an XML endpoint for XML External Entity (XXE) injection.
@@ -2186,6 +2213,23 @@ fn run(cli: &Cli) -> nullhawk_types::Result<()> {
             host: host.clone(),
             json: cli.json,
         }),
+        Command::Graphql {
+            url,
+            method,
+            header,
+            insecure,
+            yes,
+        } => {
+            license::gate().require(nullhawk_engine::license::Feature::ActiveScanner)?;
+            graphql::run(graphql::Args {
+                url,
+                method: method.as_deref(),
+                headers: header,
+                insecure: *insecure,
+                yes: *yes,
+                json: cli.json,
+            })
+        }
         Command::Upload {
             url,
             field,

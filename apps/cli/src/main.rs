@@ -21,6 +21,7 @@ mod browse;
 mod check;
 mod crawl;
 mod detectors;
+mod discover;
 mod domxss;
 mod ext;
 mod findings;
@@ -1005,6 +1006,29 @@ enum Command {
         /// Seconds to wait for an out-of-band callback before polling.
         #[arg(long, value_name = "SECS", default_value_t = 5)]
         wait: u64,
+
+        /// Do not verify the target's TLS certificate.
+        #[arg(long)]
+        insecure: bool,
+
+        /// Do not ask before sending.
+        #[arg(long)]
+        yes: bool,
+    },
+
+    /// Find paths that exist but nothing links to (`.git`, `.env`, admin panels, API docs).
+    ///
+    /// Walks a small curated list of high-signal paths, learning first what a nonexistent
+    /// path looks like (so a "soft 404" app that answers 200 for everything does not produce
+    /// a wall of false positives) and reporting only the paths that depart from it. Sends
+    /// read-only GETs, but it is active enumeration, so it asks before sending.
+    Discover {
+        /// The target URL (paths probe under its base, e.g. `https://h/app`).
+        url: String,
+
+        /// Extra header, `Name: value`. Repeatable.
+        #[arg(long = "header", value_name = "H")]
+        header: Vec<String>,
 
         /// Do not verify the target's TLS certificate.
         #[arg(long)]
@@ -2304,6 +2328,21 @@ fn run(cli: &Cli) -> nullhawk_types::Result<()> {
                 method: method.as_deref(),
                 headers: header,
                 batch: *batch,
+                insecure: *insecure,
+                yes: *yes,
+                json: cli.json,
+            })
+        }
+        Command::Discover {
+            url,
+            header,
+            insecure,
+            yes,
+        } => {
+            license::gate().require(nullhawk_engine::license::Feature::ActiveScanner)?;
+            discover::run(discover::Args {
+                url,
+                headers: header,
                 insecure: *insecure,
                 yes: *yes,
                 json: cli.json,

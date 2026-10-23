@@ -87,7 +87,7 @@ pub fn run(args: Args) -> Result<()> {
             let text = String::from_utf8_lossy(&body);
             scripts += 1;
 
-            for hit in scanner.secrets(&text) {
+            for hit in scanner.secrets.scan(&text) {
                 secrets
                     .entry((hit.kind.to_string(), hit.matched))
                     .or_insert_with(|| item.url.clone());
@@ -173,45 +173,17 @@ fn print_json(
     println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
 }
 
-/// One secret-shaped string found in a script.
-struct SecretHit {
-    kind: &'static str,
-    matched: String,
-}
-
 /// Compiled patterns, built once per run.
 struct Scanner {
-    secrets: Vec<(&'static str, Regex)>,
+    secrets: crate::secretscan::SecretScanner,
     endpoint_url: Regex,
     endpoint_path: Regex,
 }
 
 impl Scanner {
     fn new() -> Self {
-        // Each `.expect` is on a literal pattern checked at build time by the tests below,
-        // so it cannot fire at runtime.
-        let secrets = vec![
-            ("aws-access-key", r"(?:AKIA|ASIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA)[A-Z0-9]{16}"),
-            ("google-api-key", r"AIza[0-9A-Za-z_\-]{35}"),
-            ("github-token", r"gh[pousr]_[A-Za-z0-9]{36,}"),
-            ("slack-token", r"xox[baprs]-[A-Za-z0-9-]{10,48}"),
-            ("stripe-key", r"[sr]k_live_[A-Za-z0-9]{20,}"),
-            ("private-key", r"-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----"),
-            (
-                "jwt",
-                r"eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}",
-            ),
-            (
-                "hardcoded-secret-assignment",
-                r#"(?i)(?:api[_-]?key|secret|access[_-]?token|client[_-]?secret|auth[_-]?token)["']?\s*[:=]\s*["'][A-Za-z0-9_\-.]{12,}["']"#,
-            ),
-        ]
-        .into_iter()
-        .map(|(kind, pattern)| (kind, Regex::new(pattern).expect("static secret pattern")))
-        .collect();
-
         Scanner {
-            secrets,
+            secrets: crate::secretscan::SecretScanner::new(),
             // No `'` `(` `)` `,` `;` `[` `]` — those terminate a URL literal in JS source, and
             // including them swallowed the trailing `';` of `"http://…/1999/xhtml";`.
             endpoint_url: Regex::new(r#"https?://[A-Za-z0-9._~:/?#@!$&*+=%-]{4,}"#)
@@ -220,19 +192,6 @@ impl Scanner {
             endpoint_path: Regex::new(r#"["'`](/[A-Za-z0-9_][A-Za-z0-9_./\-]{2,})["'`]"#)
                 .expect("static path pattern"),
         }
-    }
-
-    fn secrets(&self, text: &str) -> Vec<SecretHit> {
-        let mut out = Vec::new();
-        for (kind, re) in &self.secrets {
-            for m in re.find_iter(text) {
-                out.push(SecretHit {
-                    kind,
-                    matched: m.as_str().to_string(),
-                });
-            }
-        }
-        out
     }
 
     fn endpoints(&self, text: &str, target_hosts: &BTreeSet<String>) -> Vec<String> {
@@ -346,52 +305,8 @@ fn truncate(value: &str, max: usize) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn all_secret_patterns_compile() {
-        // Building the scanner compiles every pattern; a bad one panics here, not in the field.
-        let _ = Scanner::new();
-    }
-
-    #[test]
-    fn it_finds_vendor_secrets_and_not_ordinary_code() {
-        let s = Scanner::new();
-        // The secret-shaped values are assembled from parts so no full key literal lives
-        // in the source — otherwise a secret scanner flags the test file itself. See the
-        // nullhawk-secret-scan-fixtures convention.
-        let aws = format!("AK{}{}", "IA", "IOSFODNN7EXAMPLE");
-        let google = format!("AI{}{}", "za", "SyA1234567890abcdefghijklmnopqrstuvw");
-        let stripe = format!("sk_{}_{}", "live", "0123456789abcdef0123456789");
-        let js = format!(
-            "const awsKey = \"{aws}\"; const g = \"{google}\"; const stripe = \"{stripe}\"; \
-             function totalTokens() {{ return cart.length; }} const count = 42;"
-        );
-        let kinds: Vec<&str> = s.secrets(&js).iter().map(|h| h.kind).collect();
-        assert!(kinds.contains(&"aws-access-key"), "{kinds:?}");
-        assert!(kinds.contains(&"google-api-key"), "{kinds:?}");
-        assert!(kinds.contains(&"stripe-key"), "{kinds:?}");
-        // `totalTokens` and `count = 42` must not be mistaken for secrets.
-        assert!(!kinds.contains(&"hardcoded-secret-assignment"), "{kinds:?}");
-    }
-
-    #[test]
-    fn a_hardcoded_assignment_is_the_weaker_signal_and_still_caught() {
-        let s = Scanner::new();
-        let js = r#"const config = { api_key: "s3cr3t_value_12345", debug: true };"#;
-        let kinds: Vec<&str> = s.secrets(js).iter().map(|h| h.kind).collect();
-        assert!(kinds.contains(&"hardcoded-secret-assignment"), "{kinds:?}");
-    }
-
-    #[test]
-    fn a_private_key_block_and_a_jwt_are_found() {
-        let s = Scanner::new();
-        let pk = "-----BEGIN RSA PRIVATE KEY-----\nMIIabc\n-----END RSA PRIVATE KEY-----";
-        assert!(s.secrets(pk).iter().any(|h| h.kind == "private-key"));
-        let jwt = format!(
-            "x = '{}.{}.{}';",
-            "eyJhbGciOiJIUzI1NiJ9", "eyJzdWIiOiJhbGljZSJ9", "c2lnbmF0dXJldmFsdWU"
-        );
-        assert!(s.secrets(&jwt).iter().any(|h| h.kind == "jwt"));
-    }
+    // Secret-pattern matching is tested in `secretscan`; here we cover the JS-specific
+    // endpoint extraction and host filtering.
 
     #[test]
     fn endpoints_are_paths_not_assets_or_placeholders() {

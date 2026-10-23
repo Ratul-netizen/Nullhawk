@@ -49,6 +49,8 @@ mod report;
 mod retire;
 mod scan;
 mod scope;
+mod secrets;
+mod secretscan;
 mod send;
 mod sequencer;
 mod setup;
@@ -909,6 +911,20 @@ enum Command {
         /// Do not ask before running.
         #[arg(long)]
         yes: bool,
+    },
+
+    /// Scan every captured response body for leaked secrets (keys, tokens, private keys).
+    ///
+    /// Reads the bodies already in the project — it sends nothing — across all content types,
+    /// not only JavaScript (`jsminer` covers scripts). Reports each secret with the response
+    /// it came from.
+    Secrets {
+        /// Project directory.
+        path: PathBuf,
+
+        /// Only responses from this host (bare host or host:port).
+        #[arg(long, value_name = "HOST")]
+        host: Option<String>,
     },
 
     /// Flag known-vulnerable JavaScript libraries in the captured scripts.
@@ -2246,6 +2262,11 @@ fn run(cli: &Cli) -> nullhawk_types::Result<()> {
             json: cli.json,
         }),
         Command::Retire { path, host } => retire::run(retire::Args {
+            project: path.clone(),
+            host: host.clone(),
+            json: cli.json,
+        }),
+        Command::Secrets { path, host } => secrets::run(secrets::Args {
             project: path.clone(),
             host: host.clone(),
             json: cli.json,

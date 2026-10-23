@@ -25,6 +25,7 @@ mod discover;
 mod domxss;
 mod ext;
 mod findings;
+mod fingerprint;
 mod fuzz;
 mod graphql;
 mod header;
@@ -912,6 +913,20 @@ enum Command {
         /// Do not ask before running.
         #[arg(long)]
         yes: bool,
+    },
+
+    /// Name the stack behind each host from the captured headers, cookies and generator tags.
+    ///
+    /// Reads the responses already in the project — it sends nothing — and reports the web
+    /// server, language, framework, CMS, CDN and WAF it can name, citing the header or cookie
+    /// behind every line (any of which can be spoofed, so each is a lead to confirm).
+    Fingerprint {
+        /// Project directory.
+        path: PathBuf,
+
+        /// Only responses from this host (bare host or host:port).
+        #[arg(long, value_name = "HOST")]
+        host: Option<String>,
     },
 
     /// Scan every captured response body for leaked secrets (keys, tokens, private keys).
@@ -2286,6 +2301,11 @@ fn run(cli: &Cli) -> nullhawk_types::Result<()> {
             json: cli.json,
         }),
         Command::Retire { path, host } => retire::run(retire::Args {
+            project: path.clone(),
+            host: host.clone(),
+            json: cli.json,
+        }),
+        Command::Fingerprint { path, host } => fingerprint::run(fingerprint::Args {
             project: path.clone(),
             host: host.clone(),
             json: cli.json,

@@ -25,6 +25,7 @@ mod detectors;
 mod discover;
 mod domxss;
 mod ext;
+mod externals;
 mod findings;
 mod fingerprint;
 mod fuzz;
@@ -915,6 +916,21 @@ enum Command {
         /// Do not ask before running.
         #[arg(long)]
         yes: bool,
+    },
+
+    /// Audit cross-origin scripts and styles for Subresource Integrity (supply-chain trust).
+    ///
+    /// Reads the captured HTML — it sends nothing — lists the third-party origins each host
+    /// loads code from, and flags every cross-origin `<script>` or stylesheet loaded without
+    /// an `integrity` attribute: code that would run with the page's privileges if that host
+    /// were compromised. Factual — the tag either pins the bytes or it does not.
+    Externals {
+        /// Project directory.
+        path: PathBuf,
+
+        /// Only pages from this host (bare host or host:port).
+        #[arg(long, value_name = "HOST")]
+        host: Option<String>,
     },
 
     /// Map the input surface: the parameters, per endpoint, the captured requests carried.
@@ -2341,6 +2357,11 @@ fn run(cli: &Cli) -> nullhawk_types::Result<()> {
             json: cli.json,
         }),
         Command::Retire { path, host } => retire::run(retire::Args {
+            project: path.clone(),
+            host: host.clone(),
+            json: cli.json,
+        }),
+        Command::Externals { path, host } => externals::run(externals::Args {
             project: path.clone(),
             host: host.clone(),
             json: cli.json,

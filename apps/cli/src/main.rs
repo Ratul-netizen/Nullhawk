@@ -16,6 +16,7 @@ use nullhawk_storage::{migrations, Project};
 
 mod active;
 mod authz;
+mod benchmark;
 mod browse;
 mod check;
 mod crawl;
@@ -877,6 +878,37 @@ enum Command {
         /// Also list undiscovered endpoints referenced by the scripts.
         #[arg(long)]
         endpoints: bool,
+    },
+
+    /// Measure the scanner against a suite of labelled targets (detection vs false positives).
+    ///
+    /// Each case is a project of captured traffic pointed at a live target, with a note of
+    /// which detectors should fire and which should not. Runs the active scanner over each
+    /// and scores it; a false positive fails the run. Sends real requests — only run a suite
+    /// of targets you are authorized to test.
+    Benchmark {
+        /// The benchmark suite (JSON): `{ "cases": [ { "name", "project", "expect": {…}, "all_clear"? } ] }`.
+        suite: PathBuf,
+
+        /// A collaborator authority for cases that need callbacks (from `oob serve`).
+        #[arg(long, value_name = "AUTHORITY")]
+        collaborator: Option<String>,
+
+        /// The per-case request ceiling.
+        #[arg(long, value_name = "N")]
+        max_requests: Option<usize>,
+
+        /// Milliseconds between requests to one host.
+        #[arg(long, value_name = "MS")]
+        delay: Option<u64>,
+
+        /// Do not verify targets' TLS certificates.
+        #[arg(long)]
+        insecure: bool,
+
+        /// Do not ask before running.
+        #[arg(long)]
+        yes: bool,
     },
 
     /// Flag known-vulnerable JavaScript libraries in the captured scripts.
@@ -2218,6 +2250,25 @@ fn run(cli: &Cli) -> nullhawk_types::Result<()> {
             host: host.clone(),
             json: cli.json,
         }),
+        Command::Benchmark {
+            suite,
+            collaborator,
+            max_requests,
+            delay,
+            insecure,
+            yes,
+        } => {
+            license::gate().require(nullhawk_engine::license::Feature::ActiveScanner)?;
+            benchmark::run(benchmark::Args {
+                suite,
+                collaborator: collaborator.as_deref(),
+                insecure: *insecure,
+                max_requests: *max_requests,
+                delay_ms: *delay,
+                yes: *yes,
+                json: cli.json,
+            })
+        }
         Command::Graphql {
             url,
             method,

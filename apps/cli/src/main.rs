@@ -910,6 +910,11 @@ enum Command {
         #[arg(long = "header", value_name = "H")]
         header: Vec<String>,
 
+        /// Alias `__typename` this many times in one query to test for unrestricted
+        /// batching (a rate-limit/DoS lever). 0 skips the probe.
+        #[arg(long, value_name = "N", default_value_t = 100)]
+        batch: usize,
+
         /// Do not verify the target's TLS certificate.
         #[arg(long)]
         insecure: bool,
@@ -2217,6 +2222,7 @@ fn run(cli: &Cli) -> nullhawk_types::Result<()> {
             url,
             method,
             header,
+            batch,
             insecure,
             yes,
         } => {
@@ -2225,6 +2231,7 @@ fn run(cli: &Cli) -> nullhawk_types::Result<()> {
                 url,
                 method: method.as_deref(),
                 headers: header,
+                batch: *batch,
                 insecure: *insecure,
                 yes: *yes,
                 json: cli.json,

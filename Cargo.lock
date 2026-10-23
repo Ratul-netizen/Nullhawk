@@ -2334,9 +2334,11 @@ dependencies = [
 name = "nullhawk-cli"
 version = "0.1.0"
 dependencies = [
+ "base64 0.21.7",
  "bytes",
  "chrono",
  "clap",
+ "flate2",
  "futures",
  "nullhawk-active",
  "nullhawk-authz",

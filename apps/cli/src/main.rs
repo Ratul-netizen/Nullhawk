@@ -20,6 +20,7 @@ mod benchmark;
 mod browse;
 mod check;
 mod crawl;
+mod decode;
 mod detectors;
 mod discover;
 mod domxss;
@@ -1029,6 +1030,29 @@ enum Command {
         /// Do not ask before sending.
         #[arg(long)]
         yes: bool,
+    },
+
+    /// Decode or encode a value through a chain of codecs, or peel its layers automatically.
+    ///
+    /// Offline and deterministic. `--from base64 --from url` decodes base64 then percent-
+    /// decodes the result; `--encode` runs the chain the other way; `--smart` guesses and
+    /// peels the layers, showing its work. Reads the value from the argument or from stdin.
+    Decode {
+        /// The value to transform; omit (or pass `-`) to read standard input.
+        input: Option<String>,
+
+        /// A codec to apply: base64, base64url, url, hex, html, gzip, deflate. Repeatable;
+        /// applied left to right.
+        #[arg(long = "from", value_name = "CODEC")]
+        from: Vec<String>,
+
+        /// Encode instead of decode (apply the chain in the reverse direction).
+        #[arg(long)]
+        encode: bool,
+
+        /// Ignore --from and auto-detect and peel the encoding layers.
+        #[arg(long)]
+        smart: bool,
     },
 
     /// Find paths that exist but nothing links to (`.git`, `.env`, admin panels, API docs).
@@ -2353,6 +2377,18 @@ fn run(cli: &Cli) -> nullhawk_types::Result<()> {
                 json: cli.json,
             })
         }
+        Command::Decode {
+            input,
+            from,
+            encode,
+            smart,
+        } => decode::run(decode::Args {
+            input: input.as_deref(),
+            from,
+            encode: *encode,
+            smart: *smart,
+            json: cli.json,
+        }),
         Command::Discover {
             url,
             header,

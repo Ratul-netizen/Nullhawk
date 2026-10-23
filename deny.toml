@@ -24,6 +24,7 @@ ignore = [
     "RUSTSEC-2025-0100", # unic-* (ICU) unmaintained, via Tauri
     "RUSTSEC-2025-0134", # rustls-pemfile: unmaintained, superseded by rustls-pki-types
     "RUSTSEC-2024-0436", # paste: unmaintained, via wasmi (the extension WASM interpreter)
+    "RUSTSEC-2024-0449", # unsafe-libyaml: unmaintained, via serde_yaml_ng; no maintained YAML stack without it
 ]
 
 [licenses]

@@ -75,6 +75,7 @@ exceptions = [
     { name = "nullhawk-ext", allow = ["AGPL-3.0-or-later"] },
     { name = "nullhawk-wasm", allow = ["AGPL-3.0-or-later"] },
     { name = "nullhawk-report", allow = ["AGPL-3.0-or-later"] },
+    { name = "nullhawk-recon", allow = ["AGPL-3.0-or-later"] },
     { name = "nullhawk-cli", allow = ["AGPL-3.0-or-later"] },
     { name = "nullhawk-desktop", allow = ["AGPL-3.0-or-later"] },
 ]

@@ -323,11 +323,42 @@ input[type="text"]:focus {
 
 .setup {
   display: grid;
-  /* `min(340px, 100%)` keeps a single column from overflowing a window narrower than
-     the track's minimum. */
-  grid-template-columns: repeat(auto-fit, minmax(min(340px, 100%), 1fr));
+  /* Six tracks so the five setup cards pack deliberately: the three environment cards
+     (Project, CA, Proxy) sit two tracks each — three across — and the two scoping cards
+     (Scope, Identities) take three tracks each, two across. No stretched sprawl on a wide
+     window and no empty trailing cell, which is what made the page read as scattered. */
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 16px;
   align-items: start;
+  /* Keep the flow readable instead of letting it span a very wide monitor edge to edge. */
+  max-width: 1200px;
+}
+.setup > .card {
+  grid-column: span 2;
+}
+/* The last two cards (Scope, Identities) are the short ones; widening them to half each
+   balances the bottom row rather than leaving a hole beside them. */
+.setup > .card:nth-last-child(1),
+.setup > .card:nth-last-child(2) {
+  grid-column: span 3;
+}
+
+/* A medium window drops to two even columns; a narrow one to a single column. */
+@media (max-width: 960px) {
+  .setup {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    max-width: none;
+  }
+  .setup > .card,
+  .setup > .card:nth-last-child(1),
+  .setup > .card:nth-last-child(2) {
+    grid-column: span 1;
+  }
+}
+@media (max-width: 560px) {
+  .setup {
+    grid-template-columns: 1fr;
+  }
 }
 
 .card {

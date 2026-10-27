@@ -3961,9 +3961,9 @@ pub async fn crawl_run(
     insecure: bool,
     identity: Option<String>,
 ) -> CommandResult<CrawlSummary> {
-    gate()
-        .require(nullhawk_engine::license::Feature::ActiveScanner)
-        .map_err(fail)?;
+    // The crawler is discovery, part of the free manual toolkit — scope-checked,
+    // robots-respecting and request-bounded. It is not gated: a crawler behind a paywall is
+    // the kind of stinginess that sends users back to the competition.
     let path = state.project_path().map_err(fail)?;
 
     let outcome = tauri::async_runtime::spawn_blocking(move || {

@@ -1,28 +1,17 @@
 import { useState } from "react";
 
-import {
-  describeError,
-  runCrawl,
-  type CrawlSummary,
-  type LicenseStatus,
-} from "../ipc";
+import { describeError, runCrawl, type CrawlSummary } from "../ipc";
 
 /**
  * The crawler: widen coverage by following in-scope links, feeding fetched pages to the
  * project so the scanner has more to work over.
  *
- * This sends requests, so it is spelled out and gated like the active scanner. The button
- * is the tester's consent — nothing goes out before it is pressed. Out-of-scope links are
- * recorded, not followed; forms are discovered, never submitted; destructive-looking links
- * and robots.txt are respected by default.
+ * This sends requests, so it is spelled out — the button is the tester's consent, and
+ * nothing goes out before it is pressed. It is part of the free toolkit, not gated:
+ * out-of-scope links are recorded, not followed; forms are discovered, never submitted;
+ * destructive-looking links and robots.txt are respected by default.
  */
-export function CrawlerView({
-  hasProject,
-  license,
-}: {
-  hasProject: boolean;
-  license: LicenseStatus | null;
-}) {
+export function CrawlerView({ hasProject }: { hasProject: boolean }) {
   const [seeds, setSeeds] = useState("");
   const [maxRequests, setMaxRequests] = useState("500");
   const [maxDepth, setMaxDepth] = useState("8");
@@ -33,8 +22,6 @@ export function CrawlerView({
   const [summary, setSummary] = useState<CrawlSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-
-  const free = (license?.tier ?? "Free") === "Free";
 
   if (!hasProject) {
     return <p className="placeholder">Open a project to crawl in-scope targets.</p>;
@@ -140,19 +127,12 @@ export function CrawlerView({
           </label>
         </div>
 
-        {free && (
-          <p className="callout warn">
-            The crawler needs the Pro tier. Start a trial or activate a licence on the
-            Licence tab.
-          </p>
-        )}
-
         <p className="callout warn">
           This sends requests to in-scope hosts. Only crawl systems you are authorized to
           test.
         </p>
 
-        <button className="primary" disabled={busy || free} onClick={crawl}>
+        <button className="primary" disabled={busy} onClick={crawl}>
           {busy ? "Crawling…" : "Crawl (sends traffic)"}
         </button>
       </section>

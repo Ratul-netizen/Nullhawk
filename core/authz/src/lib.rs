@@ -402,6 +402,16 @@ impl<T: HttpTransport> AuthzTester<T> {
         Ok(self.store.request(base)?.method)
     }
 
+    /// The target a stored request was captured against.
+    ///
+    /// A finding has to be attributed to the target the request was actually sent to; a
+    /// sweep spans many captured requests and so many targets, and each lead cites its
+    /// own. Resolved from the store rather than passed in, so the attribution cannot
+    /// drift from the request it describes.
+    pub fn target_of(&self, base: RequestId) -> Result<TargetId> {
+        Ok(self.store.target_of(base)?)
+    }
+
     /// Replays the base request as every identity in the plan.
     ///
     /// A failure to reach the target for one identity does not abort the run: that

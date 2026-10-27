@@ -15,7 +15,6 @@ use std::collections::{BTreeMap, HashSet};
 
 use nullhawk_engine::transport::HttpTransport;
 use nullhawk_types::identity::Identity;
-use nullhawk_types::ids::TargetId;
 use nullhawk_types::object::ObjectDeclaration;
 use nullhawk_types::programme::Programme;
 use nullhawk_types::verify::Verified;
@@ -165,13 +164,10 @@ pub struct SweepReport {
 /// captures of the same endpoint is one hole, so leads that make the identical claim are
 /// collapsed to the best-supported one (they keep their own citable request either way).
 ///
-/// `target` is the target every finding is attributed to; a sweep is run within one target,
-/// which the caller already knows.
-pub async fn execute<T: HttpTransport>(
-    tester: &AuthzTester<T>,
-    plan: SweepPlan,
-    target: TargetId,
-) -> SweepReport {
+/// Each lead is attributed to the target its own base request was captured against,
+/// resolved from the store per run, so a sweep that spans several hosts cites each
+/// correctly rather than filing every lead under one.
+pub async fn execute<T: HttpTransport>(tester: &AuthzTester<T>, plan: SweepPlan) -> SweepReport {
     let mut coverage = plan.coverage;
     let mut constructions = Vec::with_capacity(plan.runs.len());
     let mut findings: Vec<Verified> = Vec::new();
@@ -180,6 +176,18 @@ pub async fn execute<T: HttpTransport>(
     for run in &plan.runs {
         match tester.construct(run).await {
             Ok(construction) => {
+                // The target the base was sent to — a lead cites it, and saving a lead
+                // against a target the project never heard of would be refused.
+                let target = match tester.target_of(run.base) {
+                    Ok(target) => target,
+                    Err(error) => {
+                        errors.push(RunError {
+                            base: run.base.to_string(),
+                            message: format!("sent, but its target could not be resolved: {error}"),
+                        });
+                        continue;
+                    }
+                };
                 coverage.endpoints_run += 1;
                 coverage.attempts_sent += construction.attempts.len();
                 findings.extend(crate::analysis::construction_findings(
@@ -454,7 +462,7 @@ mod tests {
 
         let sweep = plan(&objects, &[a, b], 40, &Programme::none(), false);
         let tester = tester(Vulnerable, store, identities, in_scope());
-        let report = execute(&tester, sweep, TargetId::new()).await;
+        let report = execute(&tester, sweep).await;
 
         assert_eq!(report.coverage.endpoints_run, 2);
         assert_eq!(
@@ -493,7 +501,7 @@ mod tests {
 
         let sweep = plan(&objects, &[a, b], 40, &Programme::none(), false);
         let tester = tester(Vulnerable, store, identities, in_scope());
-        let report = execute(&tester, sweep, TargetId::new()).await;
+        let report = execute(&tester, sweep).await;
 
         assert_eq!(report.coverage.endpoints_run, 2, "both runs ran");
         assert_eq!(report.constructions.len(), 2);
@@ -517,7 +525,7 @@ mod tests {
 
         let sweep = plan(&objects, &[a, b], 40, &Programme::none(), false);
         let tester = tester(Secure, store, identities, in_scope());
-        let report = execute(&tester, sweep, TargetId::new()).await;
+        let report = execute(&tester, sweep).await;
 
         assert!(report.findings.is_empty(), "nothing was reachable");
         assert!(
@@ -547,7 +555,7 @@ mod tests {
         // sweep records each refusal and surfaces no finding — but it does not abort.
         let sweep = plan(&objects, &[a, b], 40, &Programme::none(), false);
         let tester = tester(Vulnerable, store, identities, Arc::new(Scope::new()));
-        let report = execute(&tester, sweep, TargetId::new()).await;
+        let report = execute(&tester, sweep).await;
 
         assert_eq!(report.coverage.endpoints_run, 0);
         assert_eq!(report.coverage.attempts_sent, 0);

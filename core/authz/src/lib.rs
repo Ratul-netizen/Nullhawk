@@ -86,6 +86,7 @@ pub mod compare;
 pub mod construct;
 pub mod ownership;
 pub mod session;
+pub mod sweep;
 
 /// When a credential value says it stops working, if it says.
 ///

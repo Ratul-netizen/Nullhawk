@@ -2264,9 +2264,10 @@ fn run(cli: &Cli) -> nullhawk_types::Result<()> {
             insecure,
             no_save,
         } => {
-            // The crawler sends automated traffic on its own, like the active scanner, so
-            // it sits behind the same entitlement.
-            license::gate().require(nullhawk_engine::license::Feature::ActiveScanner)?;
+            // The crawler is discovery, part of the free manual toolkit — it maps a target so
+            // a tester knows where to work. It is scope-checked, robots-respecting and
+            // request-bounded like the rest, and it is not gated: a crawler behind a paywall
+            // is the kind of stinginess that sends users back to the competition.
             crawl::run(crawl::Args {
                 project: path.clone(),
                 seeds: url.clone(),

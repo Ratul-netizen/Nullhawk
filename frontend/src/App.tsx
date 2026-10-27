@@ -381,7 +381,7 @@ export default function App() {
           />
         )}
         {tab === "crawler" && (
-          <CrawlerView hasProject={project !== null} license={license} />
+          <CrawlerView hasProject={project !== null} />
         )}
         {tab === "sitemap" && (
           <SitemapView

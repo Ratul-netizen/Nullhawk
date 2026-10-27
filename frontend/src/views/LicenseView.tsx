@@ -85,8 +85,9 @@ export function LicenseView({
 
         {!paid && (
           <p className="muted small">
-            The free tier includes interception, the repeater and reporting. The active
-            scanner, intruder, crawler, SARIF export and retest snapshots need Pro.
+            The free tier includes interception, the repeater, the crawler, recon and
+            reporting. The active scanner, intruder, SARIF export and retest snapshots
+            need Pro.
           </p>
         )}
         {expiringSoon && (

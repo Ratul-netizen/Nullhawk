@@ -48,6 +48,7 @@ mod programme;
 mod project;
 mod proxy;
 mod race;
+mod recon;
 mod repeat;
 mod report;
 mod retire;
@@ -916,6 +917,22 @@ enum Command {
         /// Do not ask before running.
         #[arg(long)]
         yes: bool,
+    },
+
+    /// The whole passive picture of a target in one pass: stack, surface, third-party code,
+    /// secrets and vulnerable libraries.
+    ///
+    /// Runs `fingerprint`, `surface`, `externals`, `secrets` and `retire` in turn over the
+    /// captured traffic, under one header — the first read of a project as one command rather
+    /// than five. It sends nothing. For machine-readable output, run a section's own command
+    /// with --json.
+    Recon {
+        /// Project directory.
+        path: PathBuf,
+
+        /// Only this host (bare host or host:port).
+        #[arg(long, value_name = "HOST")]
+        host: Option<String>,
     },
 
     /// Audit cross-origin scripts and styles for Subresource Integrity (supply-chain trust).
@@ -2360,6 +2377,10 @@ fn run(cli: &Cli) -> nullhawk_types::Result<()> {
             project: path.clone(),
             host: host.clone(),
             json: cli.json,
+        }),
+        Command::Recon { path, host } => recon::run(recon::Args {
+            project: path.clone(),
+            host: host.clone(),
         }),
         Command::Externals { path, host } => externals::run(externals::Args {
             project: path.clone(),

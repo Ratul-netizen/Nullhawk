@@ -181,6 +181,56 @@ pub struct Plan {
     pub programme_identities: Vec<nullhawk_types::identity::Identity>,
 }
 
+/// How early an experiment class should run when the budget cannot cover everything.
+///
+/// Lower runs first. The scheduler drains in this order, so a limited run spends its
+/// requests on the checks most likely to matter — the injection and data-exfiltration
+/// classes that find high-impact bugs — before the lower-value ones, rather than in
+/// alphabetical order. Keyed on the hypothesis `detector` (the `SETTLES` id of the check
+/// that answers it).
+fn class_priority(detector: &str) -> u8 {
+    match detector {
+        // Injection, code execution and data exfiltration — the headline, high-impact finds.
+        "input.sqli" | "input.cmdi" | "input.ssti" | "input.ssrf" | "input.traversal"
+        | "input.xss" | "input.stored" | "input.domxss" | "input.reflected" => 0,
+        // Access, authentication, identity and request-routing abuses.
+        "access.restricted"
+        | "auth.unverified"
+        | "authz.reachable"
+        | "jwt.guessable"
+        | "ssrf.redirectable"
+        | "redirect.controllable"
+        | "host.injection"
+        | "http.desync" => 1,
+        // Caching, CORS and parameter discovery — real, but lower impact.
+        "cache.poisoning" | "cache.deceivable" | "cache.sensitive" | "cors.configuration"
+        | "param.undiscovered" => 2,
+        // An unrecognised class sits with the middle tier — neither starved nor jumping
+        // ahead of the injection checks.
+        _ => 1,
+    }
+}
+
+/// For a queue already sorted by `(host, detector, claim)`, the index of each experiment
+/// within its `(host, detector)` run — its "round". Ordering by this round interleaves the
+/// classes (round 0 of each, then round 1 of each…), so one class does not drain the whole
+/// budget before another is touched.
+fn round_indices(work: &[Subject]) -> Vec<u32> {
+    let mut rounds = Vec::with_capacity(work.len());
+    let mut i = 0;
+    while i < work.len() {
+        let host = work[i].host();
+        let detector = &work[i].hypothesis.detector;
+        let mut r = 0u32;
+        while i < work.len() && work[i].host() == host && &work[i].hypothesis.detector == detector {
+            rounds.push(r);
+            r += 1;
+            i += 1;
+        }
+    }
+    rounds
+}
+
 impl Plan {
     /// Works out what would be sent. Sends nothing.
     ///
@@ -378,8 +428,17 @@ impl Plan {
             });
         }
 
-        // Deterministic, so two dry runs of the same project agree and a reader can
-        // compare them.
+        // Order the queue so a limited budget reaches the checks that matter.
+        //
+        // The queue drains in this order until the request ceiling is hit, so the order
+        // decides what a short run actually tests. Plain alphabetical order spent the
+        // whole budget on the early-alphabet classes (`cache.*`, `host.injection`,
+        // `input.cmdi`, `input.crlf`…) and never reached `input.sqli`/`xss`/`ssti` — so a
+        // scan of a visibly-vulnerable site could truthfully report nothing found. Instead:
+        // group by host, then by a value tier (injection and data-exfiltration first), and
+        // round-robin across the classes within a tier, so a tight budget samples every
+        // high-value check broadly rather than exhausting itself on the first one. Still
+        // fully deterministic, so two dry runs agree and a reader can compare them.
         work.sort_by(|a, b| {
             (a.host(), &a.hypothesis.detector, &a.hypothesis.claim).cmp(&(
                 b.host(),
@@ -387,6 +446,25 @@ impl Plan {
                 &b.hypothesis.claim,
             ))
         });
+        let rounds = round_indices(&work);
+        let mut ordered: Vec<(Subject, u32)> = work.into_iter().zip(rounds).collect();
+        ordered.sort_by(|(a, ra), (b, rb)| {
+            (
+                a.host(),
+                class_priority(&a.hypothesis.detector),
+                *ra,
+                &a.hypothesis.detector,
+                &a.hypothesis.claim,
+            )
+                .cmp(&(
+                    b.host(),
+                    class_priority(&b.hypothesis.detector),
+                    *rb,
+                    &b.hypothesis.detector,
+                    &b.hypothesis.claim,
+                ))
+        });
+        let work: Vec<Subject> = ordered.into_iter().map(|(subject, _)| subject).collect();
         skipped.sort_by(|a, b| (&a.detector, &a.claim).cmp(&(&b.detector, &b.claim)));
 
         Ok(Self {
@@ -966,6 +1044,27 @@ mod tests {
         assert!(ceiling.take());
         assert!(!ceiling.has_room(4));
         assert!(ceiling.has_room(2));
+    }
+
+    #[test]
+    fn injection_classes_outrank_the_lower_value_ones_in_the_queue() {
+        // The queue drains in priority order until the budget runs out, so a short run
+        // must spend its requests on the high-impact classes first. Injection and data
+        // exfiltration beat access/auth, which beat caching and discovery; an unrecognised
+        // class sits in the middle rather than being starved or jumping the injection
+        // checks. This is what stops a budgeted scan of a vulnerable site from spending
+        // everything on `cache.*`/`input.cmdi` (early in the alphabet) and never reaching
+        // `input.sqli`/`input.xss`.
+        assert!(class_priority("input.sqli") < class_priority("access.restricted"));
+        assert!(class_priority("input.xss") < class_priority("cache.poisoning"));
+        assert!(class_priority("auth.unverified") < class_priority("param.undiscovered"));
+        assert_eq!(class_priority("input.sqli"), class_priority("input.xss"));
+        // A new check nobody tiered yet is treated as mid-value, never ahead of injection.
+        assert_eq!(
+            class_priority("something.new"),
+            class_priority("auth.unverified")
+        );
+        assert!(class_priority("input.sqli") < class_priority("something.new"));
     }
 
     #[tokio::test]

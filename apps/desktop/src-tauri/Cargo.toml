@@ -27,6 +27,7 @@ nullhawk-active.workspace = true
 nullhawk-crawl.workspace = true
 nullhawk-verify.workspace = true
 nullhawk-report.workspace = true
+nullhawk-recon.workspace = true
 nullhawk-llm.workspace = true
 nullhawk-oob.workspace = true
 nullhawk-fuzz.workspace = true

@@ -1,0 +1,17 @@
+[package]
+name = "nullhawk-recon"
+description = "Passive reconnaissance over captured traffic: stack fingerprinting, attack surface, third-party code, leaked secrets and vulnerable libraries — shared by the CLI and the desktop, sending nothing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+nullhawk-types.workspace = true
+nullhawk-storage.workspace = true
+regex.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

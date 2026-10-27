@@ -97,6 +97,16 @@ const ICONS: Record<string, ReactNode> = {
       <path d="M21 21l-4.3-4.3" />
     </>
   ),
+  fingerprint: (
+    <>
+      <path d="M12 11a2 2 0 0 0-2 2c0 1.5-.3 3-1 4.5" />
+      <path d="M12 7a6 6 0 0 1 6 6c0 1.4-.2 2.8-.6 4.1" />
+      <path d="M8 6.5A6 6 0 0 1 12 5a6 6 0 0 1 4 1.5" />
+      <path d="M6.5 10a6 6 0 0 1 .8-2.3" />
+      <path d="M12 13c0 2.5-.6 5-1.8 7" />
+      <path d="M14.5 17.5a14 14 0 0 0 .5-4.5" />
+    </>
+  ),
   checks: (
     <>
       <rect x="3" y="3" width="18" height="18" rx="2" />

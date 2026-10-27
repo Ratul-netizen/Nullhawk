@@ -57,6 +57,7 @@ pub fn run() {
             commands::license_activate,
             commands::license_start_trial,
             commands::sitemap_build,
+            commands::fingerprint_scan,
             commands::crawl_run,
             commands::llm_test,
             commands::oob_test,

@@ -11,6 +11,13 @@ repository.workspace = true
 name = "nullhawk_desktop"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# Serves the bundled frontend through Tauri's asset protocol instead of the dev
+# server. The `tauri` CLI turns this on for `tauri build`, so release bundles already
+# have it; it is declared here so a plain `cargo build --release -p nullhawk-desktop`
+# also produces a production app rather than one that opens a blank devUrl page.
+custom-protocol = ["tauri/custom-protocol"]
+
 [build-dependencies]
 tauri-build.workspace = true
 

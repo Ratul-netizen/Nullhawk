@@ -4,6 +4,7 @@ import { AuthzView } from "./views/AuthzView";
 import { DashboardView } from "./views/DashboardView";
 import { DecoderView } from "./views/DecoderView";
 import { FindingsView } from "./views/FindingsView";
+import { FingerprintView } from "./views/FingerprintView";
 import { ChecksView } from "./views/ChecksView";
 import { CrawlerView } from "./views/CrawlerView";
 import { DomXssView } from "./views/DomXssView";
@@ -74,6 +75,7 @@ type Tab =
   | "crawler"
   | "report"
   | "sitemap"
+  | "fingerprint"
   | "snapshots"
   | "programme"
   | "license";
@@ -105,6 +107,7 @@ const GROUPS: { label: string; items: { id: Tab; label: string }[] }[] = [
     items: [
       { id: "crawler", label: "Crawler" },
       { id: "sitemap", label: "Site map" },
+      { id: "fingerprint", label: "Fingerprint" },
       { id: "import", label: "Import API" },
       { id: "identifiers", label: "Identifiers" },
       { id: "toolkit", label: "Toolkit" },
@@ -385,6 +388,9 @@ export default function App() {
             hasProject={project !== null}
             onOpenInRepeater={openRepeaterUrl}
           />
+        )}
+        {tab === "fingerprint" && (
+          <FingerprintView hasProject={project !== null} />
         )}
         {tab === "report" && <ReportView hasProject={project !== null} />}
         {tab === "snapshots" && (

@@ -33,6 +33,7 @@ nullhawk-browser.workspace = true
 nullhawk-ext.workspace = true
 nullhawk-wasm.workspace = true
 nullhawk-report.workspace = true
+nullhawk-recon.workspace = true
 tokio.workspace = true
 bytes.workspace = true
 chrono.workspace = true

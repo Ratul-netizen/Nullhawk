@@ -4182,6 +4182,18 @@ pub struct SitemapView {
     pub path_count: usize,
 }
 
+/// Names the stack behind each host from captured responses — the same passive analysis the
+/// CLI's `fingerprint` runs, from the shared `nullhawk_recon` crate. Read-only; no gate.
+#[tauri::command]
+pub fn fingerprint_scan(
+    state: State<'_, AppState>,
+    host: Option<String>,
+) -> CommandResult<nullhawk_recon::fingerprint::FingerprintReport> {
+    let project = open(&state)?;
+    let store = project.traffic();
+    nullhawk_recon::fingerprint::analyze(&store, host.as_deref()).map_err(fail)
+}
+
 /// Builds the host → path coverage tree from captured traffic.
 ///
 /// Read-only: it maps what the project already holds. With `forms`, it reads HTML bodies to

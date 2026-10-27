@@ -254,6 +254,29 @@ export const buildSitemap = (
   forms: boolean,
 ): Promise<SitemapView> => invoke<SitemapView>("sitemap_build", { host, forms });
 
+/** One named technology on a host, with the header/cookie evidence that named it. */
+export interface TechView {
+  name: string;
+  category: string;
+  evidence: string;
+}
+
+/** The technologies named on one host. */
+export interface HostFingerprint {
+  host: string;
+  techs: TechView[];
+}
+
+/** The passive stack fingerprint: how many responses were read, and what each host runs. */
+export interface FingerprintReport {
+  responses: number;
+  hosts: HostFingerprint[];
+}
+
+/** Names the stack behind each host from captured responses. Passive — sends nothing. */
+export const scanFingerprint = (host: string | null): Promise<FingerprintReport> =>
+  invoke<FingerprintReport>("fingerprint_scan", { host });
+
 /** What a crawl did. */
 export interface CrawlSummary {
   seeds: number;

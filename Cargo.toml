@@ -24,6 +24,7 @@ members = [
     "core/ext",
     "core/wasm",
     "core/report",
+    "core/recon",
     "apps/cli",
     "apps/desktop/src-tauri",
 ]
@@ -61,6 +62,7 @@ nullhawk-sequencer = { path = "core/sequencer" }
 nullhawk-ext = { path = "core/ext" }
 nullhawk-wasm = { path = "core/wasm" }
 nullhawk-report = { path = "core/report" }
+nullhawk-recon = { path = "core/recon" }
 
 # Async runtime. Needed at M0 only for the engine trait signatures.
 tokio = { version = "1.43", features = [

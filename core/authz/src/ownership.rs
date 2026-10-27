@@ -22,6 +22,7 @@ use nullhawk_storage::repository::Limit;
 use nullhawk_storage::TrafficStore;
 use nullhawk_types::candidate::{CandidateStatus, IdentifierCandidate};
 use nullhawk_types::identity::{Credential, Identity};
+use nullhawk_types::ids::{IdentityId, RequestId};
 use nullhawk_types::object::ObjectLocation;
 use nullhawk_types::Result;
 use serde::Serialize;
@@ -42,10 +43,13 @@ pub struct OwnedObject {
     pub descriptor: String,
     /// Where to address it in a request, for the sweep to substitute.
     pub location: ObjectLocation,
-    /// The identity it was attributed to.
+    /// The identity it was attributed to (display label).
     pub owner: String,
-    /// That identity's id, as a string.
-    pub owner_id: String,
+    /// That identity's id — what the sweep builds a declaration against.
+    pub owner_id: IdentityId,
+    /// A captured request of the owner's that carried this value, for the sweep to build
+    /// the cross-identity attempt from.
+    pub base: RequestId,
     /// How many of the owner's requests carried this value.
     pub occurrences: usize,
 }
@@ -90,7 +94,7 @@ pub fn infer(
             request.path,
             String::from_utf8_lossy(&request.body)
         );
-        requests.push((headers, haystack));
+        requests.push((item.id, headers, haystack));
     }
     Ok(tally(&requests, candidates, identities))
 }
@@ -98,7 +102,7 @@ pub fn infer(
 /// The pure core: given each request's identifying headers and searchable text, attribute
 /// every candidate to an owner where the traffic allows exactly one.
 fn tally(
-    requests: &[(CallerHeaders, String)],
+    requests: &[(RequestId, CallerHeaders, String)],
     candidates: &[IdentifierCandidate],
     identities: &[Identity],
 ) -> OwnershipReport {
@@ -121,24 +125,27 @@ fn tally(
         }
         report.considered += 1;
 
-        // Count, per identity, how many of *their* requests carried this value.
-        let mut per_owner: BTreeMap<String, (String, usize)> = BTreeMap::new();
-        for (headers, haystack) in requests {
+        // Count, per identity, how many of *their* requests carried this value, and keep the
+        // first such request as the base the sweep will build its cross-identity attempt from.
+        // Keyed by the id's string so no ordering trait is required of the id type.
+        let mut per_owner: BTreeMap<String, (IdentityId, String, usize, RequestId)> =
+            BTreeMap::new();
+        for (request, headers, haystack) in requests {
             if !haystack.contains(&candidate.value) {
                 continue;
             }
             if let Some(identity) = caller(headers, identities) {
                 let entry = per_owner
                     .entry(identity.id.to_string())
-                    .or_insert((identity.label.clone(), 0));
-                entry.1 += 1;
+                    .or_insert_with(|| (identity.id, identity.label.clone(), 0, *request));
+                entry.2 += 1;
             }
         }
 
         match per_owner.len() {
             // Exactly one identity used it, and no other did: a clean owner.
             1 => {
-                let (owner_id, (owner, occurrences)) =
+                let (_, (owner_id, owner, occurrences, base)) =
                     per_owner.into_iter().next().expect("one entry");
                 report.objects.push(OwnedObject {
                     value: candidate.value.clone(),
@@ -146,6 +153,7 @@ fn tally(
                     location: candidate.location.clone(),
                     owner,
                     owner_id,
+                    base,
                     occurrences,
                 });
             }
@@ -299,6 +307,12 @@ mod tests {
         CallerHeaders::from_raw(lines.replace('\n', "\r\n").as_bytes())
     }
 
+    /// One captured request's inputs to `tally`: a fresh id, its caller headers, and the
+    /// searchable text (path + body) object ids are matched against.
+    fn sighting(headers: CallerHeaders, text: &str) -> (RequestId, CallerHeaders, String) {
+        (RequestId::new(), headers, text.to_string())
+    }
+
     fn candidate(value: &str) -> IdentifierCandidate {
         IdentifierCandidate {
             id: CandidateId::new(),
@@ -364,18 +378,9 @@ mod tests {
         let b = cookie_identity("B", "session=bbb", &["session"]);
         let ids = [a, b];
         let reqs = vec![
-            (
-                headers("Cookie: session=aaa"),
-                "/account/INV-1001".to_string(),
-            ),
-            (
-                headers("Cookie: session=aaa"),
-                "/account/INV-1001/pdf".to_string(),
-            ),
-            (
-                headers("Cookie: session=bbb"),
-                "/account/INV-2002".to_string(),
-            ),
+            sighting(headers("Cookie: session=aaa"), "/account/INV-1001"),
+            sighting(headers("Cookie: session=aaa"), "/account/INV-1001/pdf"),
+            sighting(headers("Cookie: session=bbb"), "/account/INV-2002"),
         ];
         let report = tally(&reqs, &[candidate("INV-1001"), candidate("INV-2002")], &ids);
         assert_eq!(report.objects.len(), 2);
@@ -396,14 +401,8 @@ mod tests {
         let b = cookie_identity("B", "session=bbb", &["session"]);
         let ids = [a, b];
         let reqs = vec![
-            (
-                headers("Cookie: session=aaa"),
-                "/catalog/WIDGET".to_string(),
-            ),
-            (
-                headers("Cookie: session=bbb"),
-                "/catalog/WIDGET".to_string(),
-            ),
+            sighting(headers("Cookie: session=aaa"), "/catalog/WIDGET"),
+            sighting(headers("Cookie: session=bbb"), "/catalog/WIDGET"),
         ];
         let report = tally(&reqs, &[candidate("WIDGET")], &ids);
         assert!(report.objects.is_empty());
@@ -415,10 +414,7 @@ mod tests {
         let a = cookie_identity("A", "session=aaa", &["session"]);
         let ids = [a];
         // The request carries nobody's known session.
-        let reqs = vec![(
-            headers("Cookie: session=unknown"),
-            "/x/TOKEN123".to_string(),
-        )];
+        let reqs = vec![sighting(headers("Cookie: session=unknown"), "/x/TOKEN123")];
         let report = tally(&reqs, &[candidate("TOKEN123")], &ids);
         assert!(report.objects.is_empty());
         assert_eq!(report.unattributed, 1);
@@ -428,9 +424,9 @@ mod tests {
     fn rejected_and_too_short_candidates_are_skipped() {
         let a = cookie_identity("A", "session=aaa", &["session"]);
         let ids = [a];
-        let reqs = vec![(
+        let reqs = vec![sighting(
             headers("Cookie: session=aaa"),
-            "/a/AB /b/LONGVALUE".to_string(),
+            "/a/AB /b/LONGVALUE",
         )];
         let mut rejected = candidate("LONGVALUE");
         rejected.status = CandidateStatus::Rejected;

@@ -126,3 +126,56 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload "${{ github.ref_name }}" cli-dist/* --clobber
+
+  # After every runner has attached its artifacts, publish the two things procurement and a
+  # careful downloader both ask for: a bill of materials, and checksums over the whole release.
+  # Signing the checksums (GPG) belongs with the code-signing step and is not wired yet.
+  supply-chain:
+    name: SBOM & checksums
+    needs: release
+    # Only for a real tag release — the workflow_dispatch dry run cuts no release to attach to.
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98"
+      - uses: Swatinem/rust-cache@v2
+
+      # A CycloneDX software bill of materials for the workspace — the dependency inventory
+      # enterprise procurement asks for. Generated the same way ci.yml does, but attached to
+      # the release rather than kept only as a CI artifact.
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --locked
+      - name: Generate SBOM (CycloneDX)
+        run: cargo cyclonedx --format json
+      - name: Bundle the SBOM
+        run: zip -r "nullhawk-sbom-${{ github.ref_name }}.cdx.zip" . -i '*.cdx.json'
+
+      # Pull every asset the matrix runners attached to the draft release, add the SBOM, and
+      # publish one SHA256SUMS over all of them. Served over HTTPS from the release page, this
+      # lets a downloader confirm they got exactly what we built.
+      - name: Download the draft release's assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p dist
+          gh release download "${{ github.ref_name }}" --dir dist
+          mv "nullhawk-sbom-${{ github.ref_name }}.cdx.zip" dist/
+      - name: Compute checksums
+        working-directory: dist
+        # Write SHA256SUMS to the parent first so the glob cannot hash the file into itself,
+        # then move it in alongside the artifacts it covers.
+        run: |
+          sha256sum * > ../SHA256SUMS
+          mv ../SHA256SUMS .
+      - name: Attach SBOM and checksums to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ github.ref_name }}" \
+            "dist/nullhawk-sbom-${{ github.ref_name }}.cdx.zip" \
+            "dist/SHA256SUMS" --clobber

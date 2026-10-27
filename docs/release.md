@@ -67,6 +67,16 @@ runner builds the licensed CLI and the desktop installers and attaches them to a
 GitHub release for review before you publish it. `workflow_dispatch` runs the same build against
 a branch for a dry run.
 
+Once every runner has uploaded its artifacts, a final `supply-chain` job attaches two more
+things to the same draft release:
+
+- **`nullhawk-sbom-vX.Y.Z.cdx.zip`** — a CycloneDX software bill of materials for the
+  workspace, the dependency inventory enterprise procurement asks for.
+- **`SHA256SUMS`** — a SHA-256 over every release asset (installers, CLI binaries and the SBOM),
+  so a downloader can verify integrity. Served over HTTPS from the release page, it detects a
+  corrupted or tampered download. GPG-**signing** the checksums belongs with the code-signing
+  step (§3) and is not wired yet.
+
 Configure these repository secrets (all optional except the first; a missing signing secret just
 leaves that platform unsigned):
 
@@ -117,6 +127,20 @@ nullhawk license show     # -> Tier: Pro, licensee "Release Test"
 
 If `license show` still reports Free, the embedded public key and the signing private key do not
 match — rebuild with the correct `NULLHAWK_LICENSE_PUBKEY`.
+
+## Verifying a download (for users)
+
+Every release carries a `SHA256SUMS` file. After downloading an installer, confirm it is intact:
+
+```
+# from the folder holding the download and SHA256SUMS
+sha256sum -c SHA256SUMS --ignore-missing
+```
+
+`--ignore-missing` checks only the files you actually downloaded. A line reporting `OK` means the
+bytes match what CI built. Until the checksums are GPG-signed (a later step), this detects
+corruption and in-transit tampering, not a forged release page — trust in the page itself comes
+from HTTPS and, for the installers, from code signing (§3).
 
 ## Security notes
 

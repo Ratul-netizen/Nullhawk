@@ -223,6 +223,17 @@ export function HistoryView({
 
       {detail && (
         <div className="detail">
+          <button
+            className="detail-close"
+            onClick={() => {
+              setSelected(null);
+              setDetail(null);
+            }}
+            aria-label="Close"
+            title="Close"
+          >
+            ✕
+          </button>
           <header className="detail-header">
             <span className="mono">{detail.url}</span>
             <span className="muted">

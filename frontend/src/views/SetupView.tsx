@@ -10,6 +10,7 @@ import {
   renewIdentity,
   listScope,
   openProject,
+  pickDirectory,
   proxyStatus,
   removeIdentity,
   removeScope,
@@ -76,6 +77,16 @@ function ProjectCard({
     }
   }
 
+  async function browse() {
+    setError(null);
+    try {
+      const chosen = await pickDirectory();
+      if (chosen) setPath(chosen);
+    } catch (e) {
+      setError(describeError(e));
+    }
+  }
+
   return (
     <section className="card">
       <h2>1 · Project</h2>
@@ -93,6 +104,9 @@ function ProjectCard({
           spellCheck={false}
           onChange={(e) => setPath(e.target.value)}
         />
+        <button onClick={browse} disabled={busy}>
+          Browse…
+        </button>
         <button onClick={open} disabled={busy || path.trim() === ""}>
           {busy ? "Opening…" : "Open or create"}
         </button>
@@ -462,6 +476,19 @@ function hostOf(rule: string): string {
  * that `ps` and shell history can read, but not none, and the form says so rather
  * than leaving it to be discovered.
  */
+/** A session-validity badge derived from the credential's token expiry. */
+function sessionBadge(identity: IdentityView) {
+  if (identity.credential === "none") return <span className="muted small">—</span>;
+  if (identity.expires === null) return <span className="muted small">no expiry</span>;
+  const secs = identity.expires - Math.floor(Date.now() / 1000);
+  if (secs <= 0) return <span className="sess-badge sess-expired">expired</span>;
+  const mins = Math.floor(secs / 60);
+  const label =
+    mins >= 60 ? `${Math.floor(mins / 60)}h ${mins % 60}m` : mins >= 1 ? `${mins}m` : `${secs}s`;
+  const cls = secs < 120 ? "sess-soon" : "sess-ok";
+  return <span className={`sess-badge ${cls}`}>valid {label}</span>;
+}
+
 function IdentityCard({ project }: { project: ProjectSummary | null }) {
   const [identities, setIdentities] = useState<IdentityView[]>([]);
   const [label, setLabel] = useState("");
@@ -479,6 +506,30 @@ function IdentityCard({ project }: { project: ProjectSummary | null }) {
   const [renewName, setRenewName] = useState("");
   const [renewBusy, setRenewBusy] = useState(false);
   const [renewNote, setRenewNote] = useState<string | null>(null);
+  const [renewingId, setRenewingId] = useState<string | null>(null);
+
+  // One-click renewal: replay the identity's recorded login and adopt the fresh token,
+  // letting the engine find the token in the response on its own. No form, no dev tools.
+  const oneClickRenew = async (id: string) => {
+    setRenewingId(id);
+    setRenewNote(null);
+    try {
+      const updated = await renewIdentity({
+        who: id,
+        from: "",
+        cookie: null,
+        header: null,
+        jsonField: null,
+        insecure: false,
+      });
+      setRenewNote(`Renewed ${updated.label}'s session.`);
+      await reload();
+    } catch (e) {
+      setRenewNote(describeError(e));
+    } finally {
+      setRenewingId(null);
+    }
+  };
 
   const reload = useCallback(() => {
     if (project === null) return;
@@ -620,6 +671,7 @@ function IdentityCard({ project }: { project: ProjectSummary | null }) {
                 <th>Identity</th>
                 <th>Privilege</th>
                 <th>Credential</th>
+                <th>Session</th>
                 <th>Owns</th>
                 <th />
               </tr>
@@ -630,20 +682,37 @@ function IdentityCard({ project }: { project: ProjectSummary | null }) {
                   <td>{identity.label}</td>
                   <td className="muted">{identity.privilege}</td>
                   <td className="muted">{identity.credential}</td>
+                  <td>{sessionBadge(identity)}</td>
                   <td className="mono small">
                     {identity.owns.length === 0 ? "—" : identity.owns.join(", ")}
                   </td>
                   <td>
-                    <button
-                      className="link"
-                      onClick={() =>
-                        void removeIdentity(identity.id)
-                          .then(reload)
-                          .catch((e) => setError(describeError(e)))
-                      }
-                    >
-                      remove
-                    </button>
+                    <div className="row-actions">
+                      {identity.credential !== "none" && (
+                        <button
+                          className="link"
+                          disabled={!identity.has_login || renewingId === identity.id}
+                          title={
+                            identity.has_login
+                              ? "Replay the recorded login and adopt the fresh token"
+                              : "No recorded login to replay — capture one with browse --record-login"
+                          }
+                          onClick={() => void oneClickRenew(identity.id)}
+                        >
+                          {renewingId === identity.id ? "renewing…" : "renew"}
+                        </button>
+                      )}
+                      <button
+                        className="link"
+                        onClick={() =>
+                          void removeIdentity(identity.id)
+                            .then(reload)
+                            .catch((e) => setError(describeError(e)))
+                        }
+                      >
+                        remove
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}

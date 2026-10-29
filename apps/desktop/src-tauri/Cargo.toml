@@ -47,6 +47,10 @@ bytes.workspace = true
 chrono.workspace = true
 tokio.workspace = true
 tauri.workspace = true
+# Native folder picker for choosing a project directory. default-features off keeps it
+# off GTK on Linux (the xdg-portal backend is used there instead), so the desktop shell
+# still checks on CI; Windows and macOS use their native backend regardless.
+rfd = { version = "0.14", default-features = false, features = ["xdg-portal", "tokio"] }
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true

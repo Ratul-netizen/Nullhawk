@@ -121,6 +121,27 @@ function layout(nodes: TopoNode[]): Placed[] {
       });
     });
   }
+  // Centre the whole cloud on its centroid so it sits in the middle of the stage and orbits
+  // around itself — whether the layout fell as one dense zone or a ring of them. Without this
+  // the fit below centres on the origin, not the nodes, leaving the graph bottom-anchored.
+  if (placed.length > 0) {
+    let mx = 0;
+    let my = 0;
+    let mz = 0;
+    for (const p of placed) {
+      mx += p.x;
+      my += p.y;
+      mz += p.z;
+    }
+    mx /= placed.length;
+    my /= placed.length;
+    mz /= placed.length;
+    for (const p of placed) {
+      p.x -= mx;
+      p.y -= my;
+      p.z -= mz;
+    }
+  }
   return placed;
 }
 
@@ -153,16 +174,21 @@ export function TopologyGraph({
   const dataRef = useRef<{ placed: Placed[]; links: TopoLink[] }>({ placed: [], links: [] });
   const hoverRef = useRef<string | null>(null);
   const zoomRef = useRef(1);
+  // Raised whenever the data changes or the view is reset: the next frame recomputes an
+  // auto-fit zoom once the nodes are laid out and the canvas is sized, so the graph never
+  // opens blown-up regardless of how many nodes there are.
+  const needFitRef = useRef(true);
   const nudgeZoom = (factor: number) => {
-    zoomRef.current = Math.max(0.4, Math.min(3, zoomRef.current * factor));
+    zoomRef.current = Math.max(0.2, Math.min(3, zoomRef.current * factor));
   };
   const resetView = () => {
-    zoomRef.current = 1;
     rot.current = { x: -0.35, y: 0.5 };
+    needFitRef.current = true;
   };
 
   useEffect(() => {
     dataRef.current = { placed: layout(nodes), links };
+    needFitRef.current = true;
   }, [nodes, links]);
 
   useEffect(() => {
@@ -223,9 +249,41 @@ export function TopologyGraph({
       };
     };
 
+    // The zoom that makes the whole laid-out graph fit the stage: project every node at
+    // zoom 1 under the current rotation and take the furthest from centre. Leaves ~16%
+    // margin, and the existing 0.4..3 clamp still bounds it.
+    const fitZoom = () => {
+      const { placed } = dataRef.current;
+      if (placed.length === 0) return 1;
+      const { x: rx, y: ry } = rot.current;
+      const cosY = Math.cos(ry);
+      const sinY = Math.sin(ry);
+      const cosX = Math.cos(rx);
+      const sinX = Math.sin(rx);
+      let maxX = 1;
+      let maxY = 1;
+      for (const p of placed) {
+        const x1 = p.x * cosY - p.z * sinY;
+        const z1 = p.x * sinY + p.z * cosY;
+        const y1 = p.y * cosX - z1 * sinX;
+        const z2 = p.y * sinX + z1 * cosX;
+        const f = 620 / (620 + z2 + 260);
+        maxX = Math.max(maxX, Math.abs(x1 * f));
+        maxY = Math.max(maxY, Math.abs(y1 * f));
+      }
+      // Tighter on X (node labels extend to the right) and a lower floor than the user
+      // zoom so a dense graph (hundreds of nodes) can actually shrink to fit.
+      const z = Math.min(((width / 2) * 0.7) / maxX, ((height / 2) * 0.8) / maxY);
+      return Math.max(0.18, Math.min(3, z));
+    };
+
     let raf = 0;
     const frame = () => {
       const { placed, links: lk } = dataRef.current;
+      if (needFitRef.current && placed.length > 0) {
+        zoomRef.current = fitZoom();
+        needFitRef.current = false;
+      }
       if (autoRef.current && !drag.current.on && !reduced) {
         rot.current.y += 0.0025;
       }
@@ -357,7 +415,7 @@ export function TopologyGraph({
 
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
-      zoomRef.current = Math.max(0.4, Math.min(3, zoomRef.current * (e.deltaY < 0 ? 1.1 : 0.9)));
+      zoomRef.current = Math.max(0.2, Math.min(3, zoomRef.current * (e.deltaY < 0 ? 1.1 : 0.9)));
     };
 
     canvas.style.cursor = "grab";

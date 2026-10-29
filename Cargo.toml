@@ -26,6 +26,7 @@ members = [
     "core/report",
     "core/recon",
     "apps/cli",
+    "apps/mcp",
     "apps/desktop/src-tauri",
 ]
 # The fuzz targets are a package of their own: they need nightly and libfuzzer-sys, and a

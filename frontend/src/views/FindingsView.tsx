@@ -295,6 +295,10 @@ export function FindingsView({
           detail={detail}
           onTriage={(status) => void triage(detail.row.id, status)}
           onOpenExchange={onOpenExchange}
+          onClose={() => {
+            setSelected(null);
+            setDetail(null);
+          }}
         />
       )}
     </div>
@@ -311,10 +315,12 @@ function Detail({
   detail,
   onTriage,
   onOpenExchange,
+  onClose,
 }: {
   detail: FindingDetail;
   onTriage: (status: string) => void;
   onOpenExchange: (id: string) => void;
+  onClose: () => void;
 }) {
   const tags = [detail.cwe, detail.owasp, detail.cvss, detail.location].filter(
     (tag): tag is string => tag !== null,
@@ -322,6 +328,9 @@ function Detail({
 
   return (
     <div className="detail">
+      <button className="detail-close" onClick={onClose} aria-label="Close" title="Close">
+        ✕
+      </button>
       <header className="detail-header">
         <span>
           <span className={`badge sev-${detail.row.severity}`}>

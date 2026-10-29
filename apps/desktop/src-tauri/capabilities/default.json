@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Grant the frontend the Tauri event channel (listen/unlisten/emit) used for live updates such as proxy traffic and scan progress. Custom invoke commands do not need a capability; this only adds the core event permissions that were missing.",
+  "windows": ["main"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:event:allow-emit"
+  ]
+}

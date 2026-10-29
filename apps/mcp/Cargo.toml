@@ -1,0 +1,17 @@
+[package]
+name = "nullhawk-mcp"
+description = "Model Context Protocol server exposing Nullhawk to AI agents"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "nullhawk-mcp"
+path = "src/main.rs"
+
+[dependencies]
+nullhawk-types.workspace = true
+nullhawk-storage.workspace = true
+serde_json.workspace = true

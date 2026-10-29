@@ -287,6 +287,228 @@ pub fn project_open(state: State<'_, AppState>, path: String) -> CommandResult<P
     Ok(summary)
 }
 
+/// Opens a native folder picker and returns the chosen directory, or `None` if it was
+/// dismissed. Lets Setup offer a directory chooser rather than a path that has to be typed.
+#[tauri::command]
+pub async fn pick_directory() -> CommandResult<Option<String>> {
+    let chosen = rfd::AsyncFileDialog::new()
+        .set_title("Choose a project directory")
+        .pick_folder()
+        .await;
+    Ok(chosen.map(|handle| handle.path().to_string_lossy().into_owned()))
+}
+
+/// Opens a native file picker (e.g. for a wordlist) and returns the chosen path, or `None`.
+#[tauri::command]
+pub async fn pick_file() -> CommandResult<Option<String>> {
+    let chosen = rfd::AsyncFileDialog::new()
+        .set_title("Choose a file")
+        .pick_file()
+        .await;
+    Ok(chosen.map(|handle| handle.path().to_string_lossy().into_owned()))
+}
+
+/// The outcome of attempting to recover a JWT's HMAC signing secret.
+#[derive(Debug, Clone, Serialize)]
+pub struct CrackResult {
+    pub found: bool,
+    /// The recovered secret, if one was found. This IS sensitive, but it is the finding.
+    pub secret: Option<String>,
+    /// What did the work — `hashcat (GPU)` or `cpu`.
+    pub tool: String,
+    /// How many candidates were tried on the CPU path; `None` for hashcat.
+    pub tried: Option<usize>,
+    pub note: String,
+    /// Whether a hashcat binary was found on PATH, so the UI can suggest installing it.
+    pub hashcat_available: bool,
+}
+
+/// Is a hashcat binary runnable on this machine?
+fn has_hashcat() -> bool {
+    std::process::Command::new("hashcat")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Recovers a JWT's HMAC signing secret. With a wordlist and hashcat present, the work runs
+/// on the GPU (hashcat mode 16500); otherwise it falls back to a CPU dictionary pass. Pro:
+/// the curated `jwt.secret` scan check is the free, no-brute-force tell; this is the "throw
+/// a real wordlist and the GPU at it" escalation.
+#[tauri::command]
+pub async fn jwt_crack(token: String, wordlist: Option<String>) -> CommandResult<CrackResult> {
+    gate()
+        .require(nullhawk_engine::license::Feature::ActiveScanner)
+        .map_err(fail)?;
+    tauri::async_runtime::spawn_blocking(move || jwt_crack_blocking(token, wordlist))
+        .await
+        .map_err(fail)?
+}
+
+fn jwt_crack_blocking(token: String, wordlist: Option<String>) -> CommandResult<CrackResult> {
+    let token = token.trim().to_string();
+    let jwt = nullhawk_types::jwt::Jwt::parse(&token)
+        .map_err(|_| "that value is not a JWT, so it has no HMAC signature to attack".to_string())?;
+    let alg = jwt.algorithm().unwrap_or("").to_string();
+    if !alg.starts_with("HS") {
+        return Err(format!(
+            "the token is {}, which has no shared secret to recover — only an HMAC token \
+             (HS256/384/512) can be cracked this way",
+            if alg.is_empty() {
+                "unsigned / has no stated algorithm"
+            } else {
+                &alg
+            },
+        ));
+    }
+    let hashcat = has_hashcat();
+    match (wordlist.as_deref(), hashcat) {
+        (Some(wl), true) => crack_with_hashcat(&token, wl),
+        (Some(wl), false) => crack_cpu_file(&token, wl),
+        (None, _) => crack_cpu_builtin(&token, hashcat),
+    }
+}
+
+fn crack_with_hashcat(token: &str, wordlist: &str) -> CommandResult<CrackResult> {
+    let dir = std::env::temp_dir();
+    let stamp = std::process::id();
+    let hashfile = dir.join(format!("nh_jwt_{stamp}.hash"));
+    let outfile = dir.join(format!("nh_jwt_{stamp}.out"));
+    std::fs::write(&hashfile, token).map_err(|e| format!("could not write temp hash file: {e}"))?;
+    let _ = std::fs::remove_file(&outfile);
+
+    let output = std::process::Command::new("hashcat")
+        .args(["-m", "16500", "-a", "0", "--quiet", "--potfile-disable"])
+        .arg("--outfile")
+        .arg(&outfile)
+        .args(["--outfile-format", "2"]) // the plaintext secret only
+        .arg(&hashfile)
+        .arg(wordlist)
+        .output()
+        .map_err(|e| format!("could not run hashcat: {e}"))?;
+    let _ = std::fs::remove_file(&hashfile);
+
+    let secret = std::fs::read_to_string(&outfile)
+        .ok()
+        .and_then(|s| s.lines().next().map(|l| l.trim_end_matches(['\r', '\n']).to_string()))
+        .filter(|s| !s.is_empty());
+    let _ = std::fs::remove_file(&outfile);
+
+    Ok(match secret {
+        Some(s) => CrackResult {
+            found: true,
+            secret: Some(s),
+            tool: "hashcat (GPU)".into(),
+            tried: None,
+            note: "the signing secret was recovered on the GPU — any token can now be forged \
+                   with `jwt forge`"
+                .into(),
+            hashcat_available: true,
+        },
+        None => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            CrackResult {
+                found: false,
+                secret: None,
+                tool: "hashcat (GPU)".into(),
+                tried: None,
+                note: if stderr.trim().is_empty() {
+                    "hashcat exhausted the wordlist without finding the secret — it is not in \
+                     that list"
+                        .into()
+                } else {
+                    format!("hashcat did not recover the secret: {}", stderr.trim())
+                },
+                hashcat_available: true,
+            }
+        }
+    })
+}
+
+fn crack_cpu_file(token: &str, wordlist: &str) -> CommandResult<CrackResult> {
+    let content =
+        std::fs::read_to_string(wordlist).map_err(|e| format!("could not read the wordlist: {e}"))?;
+    let start = std::time::Instant::now();
+    let mut tried = 0usize;
+    let mut found = None;
+    for line in content.lines() {
+        let candidate = line.strip_suffix('\r').unwrap_or(line);
+        tried += 1;
+        if nullhawk_types::jwt::hs_secret_matches(token, candidate.as_bytes()) {
+            found = Some(candidate.to_string());
+            break;
+        }
+        // A CPU HMAC pass is slow; cap it so the window never hangs. This is why hashcat
+        // and a GPU matter for anything bigger than a short list.
+        if tried % 20_000 == 0 && start.elapsed().as_secs() >= 45 {
+            break;
+        }
+    }
+    Ok(cpu_result(
+        found,
+        tried,
+        false,
+        "the wordlist on the CPU — install hashcat for GPU speed on a real list",
+    ))
+}
+
+fn crack_cpu_builtin(token: &str, hashcat_available: bool) -> CommandResult<CrackResult> {
+    let list = builtin_secrets();
+    let tried = list.len();
+    let found = list
+        .into_iter()
+        .find(|c| nullhawk_types::jwt::hs_secret_matches(token, c.as_bytes()));
+    let how = if hashcat_available {
+        "the built-in common-secrets list — pick a wordlist to run a full GPU crack with hashcat"
+    } else {
+        "the built-in common-secrets list — install hashcat and pick a wordlist for a full GPU crack"
+    };
+    Ok(cpu_result(found, tried, hashcat_available, how))
+}
+
+fn cpu_result(
+    found: Option<String>,
+    tried: usize,
+    hashcat_available: bool,
+    how: &str,
+) -> CrackResult {
+    match found {
+        Some(s) => CrackResult {
+            found: true,
+            secret: Some(s),
+            tool: "cpu".into(),
+            tried: Some(tried),
+            note: "the signing secret was recovered — any token can now be forged".into(),
+            hashcat_available,
+        },
+        None => CrackResult {
+            found: false,
+            secret: None,
+            tool: "cpu".into(),
+            tried: Some(tried),
+            note: format!("not found after {tried} candidate(s) from {how}."),
+            hashcat_available,
+        },
+    }
+}
+
+/// The short list of secrets a JWT should never use — tutorial samples and defaults. The
+/// full attack is a real wordlist on the GPU via hashcat.
+fn builtin_secrets() -> Vec<String> {
+    [
+        "secret", "secretkey", "secret123", "your-256-bit-secret", "your_jwt_secret", "jwt",
+        "jwtsecret", "jwt_secret", "password", "changeme", "change-me", "admin", "administrator",
+        "token", "key", "private", "privatekey", "mysecret", "supersecret", "s3cr3t", "security",
+        "test", "testing", "dev", "development", "qwerty", "123456", "0000", "",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
 /// Reports the open project, if there is one.
 #[tauri::command]
 pub fn project_current(state: State<'_, AppState>) -> CommandResult<Option<ProjectSummary>> {
@@ -2122,6 +2344,12 @@ pub struct IdentityView {
     /// The *kind* of credential — `bearer`, `cookie`, `none` — never its value.
     pub credential: String,
     pub owns: Vec<String>,
+    /// When the credential's token stops working (Unix seconds), if it says. This is the
+    /// expiry only — never the token — so the window can show "valid 12 min" and warn when
+    /// a session is about to lapse.
+    pub expires: Option<i64>,
+    /// Whether this identity has a recorded login that `renew` can replay in one click.
+    pub has_login: bool,
 }
 
 /// Lists the identities a project can test as.
@@ -2268,20 +2496,34 @@ fn identity_renew_blocking(
         Credential::Header { name, .. } => name.clone(),
     };
 
-    let sources = [cookie.is_some(), header.is_some(), json_field.is_some()]
-        .iter()
-        .filter(|s| **s)
-        .count();
-    if sources != 1 {
+    // Explicit location (the renew form) must name exactly one source. With none, the
+    // one-click path auto-detects the new token from the login response below.
+    let explicit = cookie.is_some() || header.is_some() || json_field.is_some();
+    if explicit
+        && [cookie.is_some(), header.is_some(), json_field.is_some()]
+            .iter()
+            .filter(|s| **s)
+            .count()
+            != 1
+    {
         return Err(
             "give exactly one of a cookie, a header, or a JSON field to read the token from"
                 .to_string(),
         );
     }
 
-    let request_id: RequestId = from
-        .parse()
-        .map_err(|e| format!("{from} is not a request id: {e}"))?;
+    // An empty `from` means "replay the login this identity recorded" — the one-click path.
+    let from = from.trim();
+    let request_id: RequestId = if from.is_empty() {
+        identity.login_request.ok_or_else(|| {
+            "this identity has no recorded login to replay. Capture one with \
+             browse --record-login, or use the renew form to point at a login request."
+                .to_string()
+        })?
+    } else {
+        from.parse()
+            .map_err(|e| format!("{from} is not a request id: {e}"))?
+    };
     let transport = if insecure {
         TcpTransport::with_tls(TlsConfig::accept_any()).http2(true)
     } else {
@@ -2302,7 +2544,67 @@ fn identity_renew_blocking(
         .map_err(fail)?;
     let response = &sent.exchange.response;
 
-    let raw_value = if let Some(name) = &cookie {
+    let raw_value = if !explicit {
+        // One-click renew: find the new session in the login response on its own. For a
+        // cookie identity, adopt the Set-Cookie it names (or the first); for a bearer or
+        // header identity, read a token out of the JSON body, then a token-ish header.
+        if kind == "cookie" {
+            let mut found = None;
+            for h in response.headers.get_all("set-cookie") {
+                let v = h.value_lossy();
+                let pair = v.split(';').next().unwrap_or("");
+                if let Some((k, val)) = pair.split_once('=') {
+                    let k = k.trim();
+                    let wanted = identity.session_cookies.is_empty()
+                        || identity
+                            .session_cookies
+                            .iter()
+                            .any(|n| n.eq_ignore_ascii_case(k));
+                    if wanted {
+                        found = Some(format!("{k}={}", val.trim()));
+                        break;
+                    }
+                }
+            }
+            found.ok_or_else(|| "the login response set no session cookie to adopt".to_string())?
+        } else {
+            let fields = [
+                "access_token",
+                "accessToken",
+                "token",
+                "jwt",
+                "id_token",
+                "idToken",
+                "session",
+                "sessionToken",
+            ];
+            let look = |obj: &serde_json::Value| -> Option<String> {
+                fields.iter().find_map(|f| match obj.get(f) {
+                    Some(serde_json::Value::String(s)) if !s.is_empty() => Some(s.clone()),
+                    _ => None,
+                })
+            };
+            let mut found = serde_json::from_slice::<serde_json::Value>(response.body.as_ref())
+                .ok()
+                .and_then(|root| look(&root).or_else(|| root.get("data").and_then(look)));
+            if found.is_none() {
+                for name in ["x-auth-token", "x-access-token", "authorization"] {
+                    if let Some(h) = response.headers.get(name) {
+                        let v = h.value_lossy().trim().to_string();
+                        if !v.is_empty() {
+                            found = Some(v);
+                            break;
+                        }
+                    }
+                }
+            }
+            found.ok_or_else(|| {
+                "could not find a new token in the login response — open the renew form and \
+                 point at the cookie, header or JSON field it is in"
+                    .to_string()
+            })?
+        }
+    } else if let Some(name) = &cookie {
         let mut found = None;
         for h in response.headers.get_all("set-cookie") {
             let value = h.value_lossy();
@@ -5060,6 +5362,8 @@ fn identity_view(identity: &Identity) -> IdentityView {
         privilege: privilege_name(identity.privilege).to_string(),
         credential: credential_kind(&identity.credential).to_string(),
         owns: identity.owned_object_ids.clone(),
+        expires: identity.lifetime().map(|l| l.expires_at),
+        has_login: identity.login_request.is_some(),
     }
 }
 

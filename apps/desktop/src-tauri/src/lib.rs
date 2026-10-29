@@ -47,6 +47,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::engine_info,
             commands::project_open,
+            commands::pick_directory,
+            commands::pick_file,
+            commands::jwt_crack,
             commands::project_current,
             commands::proxy_start,
             commands::proxy_stop,
@@ -126,6 +129,27 @@ pub fn run() {
             commands::findings_triage,
             commands::report_render,
         ])
+        .setup(|app| {
+            use tauri::{LogicalSize, Manager};
+            // Fit the window to the actual monitor at startup — any resolution, any DPI —
+            // rather than a fixed size that can run under the taskbar on a smaller or scaled
+            // display. The tauri.conf.json size is only the fallback if this can't resolve.
+            if let Some(window) = app.get_webview_window("main") {
+                if let Ok(Some(monitor)) = window.primary_monitor() {
+                    let scale = monitor.scale_factor();
+                    let phys = monitor.size();
+                    let screen_w = phys.width as f64 / scale;
+                    let screen_h = phys.height as f64 / scale;
+                    // Leave room for the taskbar and title bar; cap so it isn't vast on a big
+                    // screen, floor at the usable minimum the config declares.
+                    let w = (screen_w - 60.0).clamp(960.0, 1560.0);
+                    let h = (screen_h - 110.0).clamp(600.0, 1040.0);
+                    let _ = window.set_size(LogicalSize::new(w, h));
+                    let _ = window.center();
+                }
+            }
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("failed to start the Nullhawk desktop shell");
 }

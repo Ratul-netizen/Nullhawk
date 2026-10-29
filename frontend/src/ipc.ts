@@ -168,6 +168,10 @@ export const fetchEngineInfo = (): Promise<EngineInfo> =>
 export const openProject = (path: string): Promise<ProjectSummary> =>
   invoke<ProjectSummary>("project_open", { path });
 
+/** Native folder picker; resolves to the chosen directory, or null if dismissed. */
+export const pickDirectory = (): Promise<string | null> =>
+  invoke<string | null>("pick_directory");
+
 export const currentProject = (): Promise<ProjectSummary | null> =>
   invoke<ProjectSummary | null>("project_current");
 
@@ -852,6 +856,10 @@ export interface IdentityView {
   privilege: string;
   credential: string;
   owns: string[];
+  /** When the credential's token stops working (Unix seconds), if it says. */
+  expires: number | null;
+  /** Whether a recorded login exists that renew can replay in one click. */
+  has_login: boolean;
 }
 
 export const listIdentities = (): Promise<IdentityView[]> =>
@@ -870,6 +878,24 @@ export const addIdentity = (identity: {
  * Renews an identity's session by replaying a captured login and reading the new token from its
  * response (one of a Set-Cookie cookie, a response header, or a JSON body field).
  */
+/** The outcome of attempting to recover a JWT's HMAC signing secret. */
+export interface CrackResult {
+  found: boolean;
+  secret: string | null;
+  tool: string;
+  tried: number | null;
+  note: string;
+  hashcat_available: boolean;
+}
+
+/** Recover a JWT's HMAC secret — GPU via hashcat when a wordlist is given and hashcat is
+ *  installed, otherwise a CPU dictionary pass. */
+export const jwtCrack = (token: string, wordlist: string | null): Promise<CrackResult> =>
+  invoke<CrackResult>("jwt_crack", { token, wordlist });
+
+/** Native file picker (e.g. to choose a wordlist). */
+export const pickFile = (): Promise<string | null> => invoke<string | null>("pick_file");
+
 export const renewIdentity = (args: {
   who: string;
   from: string;

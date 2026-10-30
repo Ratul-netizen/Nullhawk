@@ -13,16 +13,17 @@
 //! cannot happen by accident — it needs the explicit mirror type below, which opts
 //! each secret field into cleartext with `#[serde(with = "redact::exposed")]`.
 //!
-//! That mirror is the single place in Nullhawk where a credential is written out in the
-//! clear, which is exactly the property review needs: one greppable location to
-//! examine, rather than "wherever serde happened to reach".
+//! That mirror is the single place in Nullhawk where a credential is turned into the
+//! cleartext JSON that gets sealed, which is exactly the property review needs: one
+//! greppable location to examine, rather than "wherever serde happened to reach".
 //!
-//! # What this does not do yet
+//! # Encryption at rest
 //!
-//! The stored credential is **not encrypted at rest**. `docs/threat-model.md` calls
-//! for encryption under a project passphrase; that is not implemented, so a project
-//! file is as sensitive as the credentials it holds. [`IdentityStore::put`] says so in
-//! its own documentation rather than leaving a tester to assume otherwise.
+//! The cleartext JSON that mirror produces is sealed by [`crate::crypt`] before it is
+//! written, and opened only in memory on read, under a key held in the OS keystore. A
+//! project directory copied to another machine or user account carries the ciphertext
+//! but not the key, so its credentials do not come with it. Captured traffic and findings
+//! are not encrypted — they are evidence, not live access; see `docs/threat-model.md`.
 
 use nullhawk_types::identity::{Credential, Identity, PrivilegeLevel};
 use nullhawk_types::ids::IdentityId;
@@ -117,14 +118,18 @@ impl IdentityStore {
 
     /// Inserts an identity, or replaces the one already stored under its id.
     ///
-    /// **The credential is written in cleartext.** Project files are as sensitive as
-    /// the sessions they hold; encryption at rest is not implemented.
+    /// The credential is sealed at rest by [`crate::crypt`] under a key held in the OS
+    /// keystore. This fails closed: if the key is unavailable the identity is not written
+    /// rather than written in the clear.
     pub fn put(&self, identity: &Identity) -> Result<()> {
         let credential = serde_json::to_string(&StoredCredential::from(&identity.credential))
             .map_err(|e| StorageError::Decode {
                 entity: "Credential",
                 reason: e.to_string(),
             })?;
+        // Seal before it touches disk. Fails closed: a missing key is an error, never a
+        // cleartext write. See `crypt`.
+        let credential = crate::crypt::seal(&credential)?;
         let extra_headers =
             serde_json::to_string(&identity.extra_headers).map_err(|e| StorageError::Decode {
                 entity: "extra headers",
@@ -266,6 +271,8 @@ fn decode(
     let (id, label, privilege, credential, extra_headers, owned, session_cookies, login_request) =
         row;
 
+    // Opens a sealed credential; a pre-encryption cleartext value passes through unchanged.
+    let credential = crate::crypt::open(&credential)?;
     let stored: StoredCredential =
         serde_json::from_str(&credential).map_err(|e| StorageError::Decode {
             entity: "Credential",

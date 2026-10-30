@@ -350,8 +350,9 @@ pub async fn jwt_crack(token: String, wordlist: Option<String>) -> CommandResult
 
 fn jwt_crack_blocking(token: String, wordlist: Option<String>) -> CommandResult<CrackResult> {
     let token = token.trim().to_string();
-    let jwt = nullhawk_types::jwt::Jwt::parse(&token)
-        .map_err(|_| "that value is not a JWT, so it has no HMAC signature to attack".to_string())?;
+    let jwt = nullhawk_types::jwt::Jwt::parse(&token).map_err(|_| {
+        "that value is not a JWT, so it has no HMAC signature to attack".to_string()
+    })?;
     let alg = jwt.algorithm().unwrap_or("").to_string();
     if !alg.starts_with("HS") {
         return Err(format!(
@@ -393,7 +394,11 @@ fn crack_with_hashcat(token: &str, wordlist: &str) -> CommandResult<CrackResult>
 
     let secret = std::fs::read_to_string(&outfile)
         .ok()
-        .and_then(|s| s.lines().next().map(|l| l.trim_end_matches(['\r', '\n']).to_string()))
+        .and_then(|s| {
+            s.lines()
+                .next()
+                .map(|l| l.trim_end_matches(['\r', '\n']).to_string())
+        })
         .filter(|s| !s.is_empty());
     let _ = std::fs::remove_file(&outfile);
 
@@ -429,8 +434,8 @@ fn crack_with_hashcat(token: &str, wordlist: &str) -> CommandResult<CrackResult>
 }
 
 fn crack_cpu_file(token: &str, wordlist: &str) -> CommandResult<CrackResult> {
-    let content =
-        std::fs::read_to_string(wordlist).map_err(|e| format!("could not read the wordlist: {e}"))?;
+    let content = std::fs::read_to_string(wordlist)
+        .map_err(|e| format!("could not read the wordlist: {e}"))?;
     let start = std::time::Instant::now();
     let mut tried = 0usize;
     let mut found = None;
@@ -499,10 +504,35 @@ fn cpu_result(
 /// full attack is a real wordlist on the GPU via hashcat.
 fn builtin_secrets() -> Vec<String> {
     [
-        "secret", "secretkey", "secret123", "your-256-bit-secret", "your_jwt_secret", "jwt",
-        "jwtsecret", "jwt_secret", "password", "changeme", "change-me", "admin", "administrator",
-        "token", "key", "private", "privatekey", "mysecret", "supersecret", "s3cr3t", "security",
-        "test", "testing", "dev", "development", "qwerty", "123456", "0000", "",
+        "secret",
+        "secretkey",
+        "secret123",
+        "your-256-bit-secret",
+        "your_jwt_secret",
+        "jwt",
+        "jwtsecret",
+        "jwt_secret",
+        "password",
+        "changeme",
+        "change-me",
+        "admin",
+        "administrator",
+        "token",
+        "key",
+        "private",
+        "privatekey",
+        "mysecret",
+        "supersecret",
+        "s3cr3t",
+        "security",
+        "test",
+        "testing",
+        "dev",
+        "development",
+        "qwerty",
+        "123456",
+        "0000",
+        "",
     ]
     .iter()
     .map(|s| s.to_string())

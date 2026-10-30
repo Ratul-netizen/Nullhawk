@@ -131,6 +131,11 @@ http = "1"
 ring = "0.17"
 base64 = "0.21"
 
+# Credential encryption at rest (core/storage/src/crypt.rs): the data-encryption key
+# lives in the OS secret store (Windows Credential Manager / macOS Keychain). Native
+# backends only — a headless Linux/CI host uses the NULLHAWK_CREDENTIAL_KEY env instead.
+keyring = { version = "3", features = ["windows-native", "apple-native"] }
+
 # Hashing (content-addressed blob store)
 sha2 = "0.10"
 # Only ever a lookup key for the Windows certificate store, never a security

@@ -132,11 +132,15 @@ Dropbox/Slack/a NAS.
 
 ### What Nullhawk does not do — be clear about this
 
-- **Project data is not encrypted at rest by default.** A project directory contains
-  captured traffic and, if identities are configured, credentials. Anyone who can read
-  the directory can read those. Optional passphrase encryption of the credential
-  columns is planned; whole-project encryption is not, because it would conflict with
-  the portability that makes a project directory useful.
+- **Credential columns are encrypted at rest; the rest of a project is not.** Identity
+  credentials are sealed (ChaCha20-Poly1305) under a data-encryption key held in the OS
+  secret store — Windows Credential Manager, macOS Keychain — so a project directory
+  copied to another machine or user account carries the ciphertext but not the key. See
+  `core/storage/src/crypt.rs`. Captured traffic and findings are **not** encrypted: they
+  are evidence, not live access, and encrypting them would conflict with the portability
+  that makes a project directory useful. On a headless/CI host with no OS keystore, the
+  key is supplied via `NULLHAWK_CREDENTIAL_KEY`. Whole-project or passphrase-based
+  encryption remains a possible future layer for portability across machines.
 - **The interception CA private key is stored on disk** and is only as protected as
   the filesystem. A stolen CA key lets an attacker impersonate any site to that
   machine. The CA must be per-installation, never shipped, never shared, and easy to
@@ -191,8 +195,9 @@ tester can answer "what did this tool do, and when".
 Tracked here rather than resolved prematurely:
 
 1. Where does the CA key live on each platform, and can OS keychains hold it?
-2. Should credential columns be encrypted with a project passphrase by default, given
-   the usability cost of prompting on every open?
+2. Credential columns are now encrypted under an OS-keystore key (no prompt). Open
+   question remaining: is a project passphrase worth offering as an option, to carry
+   credentials between machines, despite the cost of prompting on every open?
 3. Can the Burp/JVM bridge be confined enough (separate process, restricted RPC, no
    filesystem) to be honestly described as sandboxed?
 4. What is the right default when a redirect crosses from in-scope to out-of-scope

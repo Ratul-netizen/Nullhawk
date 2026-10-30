@@ -50,7 +50,10 @@ fn main() {
             "tools/call" => {
                 let params = msg.get("params").cloned().unwrap_or_else(|| json!({}));
                 let name = params.get("name").and_then(Value::as_str).unwrap_or("");
-                let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+                let args = params
+                    .get("arguments")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
                 match call_tool(name, &args) {
                     Ok(text) => respond(
                         &mut out,
@@ -81,8 +84,7 @@ fn respond(out: &mut impl Write, id: Option<Value>, result: Value) {
 }
 
 fn respond_error(out: &mut impl Write, id: Option<Value>, code: i64, message: &str) {
-    let msg =
-        json!({ "jsonrpc": "2.0", "id": id.unwrap_or(Value::Null), "error": { "code": code, "message": message } });
+    let msg = json!({ "jsonrpc": "2.0", "id": id.unwrap_or(Value::Null), "error": { "code": code, "message": message } });
     let _ = writeln!(out, "{msg}");
     let _ = out.flush();
 }
@@ -184,8 +186,7 @@ fn tool_jwt_decode(args: &Value) -> Result<String, String> {
         .get("token")
         .and_then(Value::as_str)
         .ok_or("`token` is required")?;
-    let jwt =
-        nullhawk_types::jwt::Jwt::parse(token).map_err(|e| format!("not a JWT: {e}"))?;
+    let jwt = nullhawk_types::jwt::Jwt::parse(token).map_err(|e| format!("not a JWT: {e}"))?;
     Ok(pretty(&json!({
         "header": jwt.header,
         "payload": jwt.payload,
@@ -211,7 +212,11 @@ fn tool_findings(args: &Value) -> Result<String, String> {
     };
     let page = project
         .findings()
-        .list(&filter, None, nullhawk_storage::repository::Limit::new(limit))
+        .list(
+            &filter,
+            None,
+            nullhawk_storage::repository::Limit::new(limit),
+        )
         .map_err(|e| e.to_string())?;
 
     let items: Vec<Value> = page
@@ -260,7 +265,11 @@ fn tool_decode(args: &Value) -> Result<String, String> {
     let codecs: Vec<String> = args
         .get("codecs")
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default();
     if codecs.is_empty() {
         return Err("`codecs` must list at least one codec".into());
@@ -367,7 +376,10 @@ fn tool_sitemap(args: &Value) -> Result<String, String> {
     let mut cursor: Option<nullhawk_storage::repository::Cursor> = None;
     loop {
         let page = store
-            .history(cursor.as_ref(), nullhawk_storage::repository::Limit::new(500))
+            .history(
+                cursor.as_ref(),
+                nullhawk_storage::repository::Limit::new(500),
+            )
             .map_err(|e| e.to_string())?;
         for item in &page.items {
             if let Some(h) = &host {

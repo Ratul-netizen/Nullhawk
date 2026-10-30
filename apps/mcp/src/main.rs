@@ -111,6 +111,34 @@ fn tool_schemas() -> Value {
                 },
                 "required": ["project"]
             }
+        },
+        {
+            "name": "history",
+            "description": "List captured HTTP exchanges (method, URL, status) from a Nullhawk project, newest first. Read-only.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string", "description": "Path to the Nullhawk project directory." },
+                    "limit": { "type": "integer", "description": "Maximum exchanges to return (default 50)." }
+                },
+                "required": ["project"]
+            }
+        },
+        {
+            "name": "decode",
+            "description": "Decode a value through a chain of codecs (offline). Each codec is applied left to right.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "input": { "type": "string", "description": "The value to decode." },
+                    "codecs": {
+                        "type": "array",
+                        "items": { "type": "string", "enum": ["base64", "base64url", "url", "hex"] },
+                        "description": "Codecs to apply in order, e.g. [\"base64\",\"url\"]."
+                    }
+                },
+                "required": ["input", "codecs"]
+            }
         }
     ])
 }
@@ -119,6 +147,8 @@ fn call_tool(name: &str, args: &Value) -> Result<String, String> {
     match name {
         "jwt_decode" => tool_jwt_decode(args),
         "findings" => tool_findings(args),
+        "history" => tool_history(args),
+        "decode" => tool_decode(args),
         _ => Err(format!("unknown tool: {name}")),
     }
 }
@@ -171,6 +201,117 @@ fn tool_findings(args: &Value) -> Result<String, String> {
         })
         .collect();
     Ok(pretty(&json!({ "count": items.len(), "findings": items })))
+}
+
+fn tool_history(args: &Value) -> Result<String, String> {
+    let path = args
+        .get("project")
+        .and_then(Value::as_str)
+        .ok_or("`project` is required")?;
+    let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(50) as u32;
+
+    let project = nullhawk_storage::Project::open(Path::new(path)).map_err(|e| e.to_string())?;
+    let store = project.traffic();
+    let total = store.count().map_err(|e| e.to_string())?;
+    let page = store
+        .history(None, nullhawk_storage::repository::Limit::new(limit))
+        .map_err(|e| e.to_string())?;
+    let rows: Vec<Value> = page
+        .items
+        .iter()
+        .map(|t| json!({ "method": t.method, "url": t.url, "status": t.status }))
+        .collect();
+    Ok(pretty(
+        &json!({ "total": total, "returned": rows.len(), "exchanges": rows }),
+    ))
+}
+
+fn tool_decode(args: &Value) -> Result<String, String> {
+    let input = args
+        .get("input")
+        .and_then(Value::as_str)
+        .ok_or("`input` is required")?;
+    let codecs: Vec<String> = args
+        .get("codecs")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    if codecs.is_empty() {
+        return Err("`codecs` must list at least one codec".into());
+    }
+
+    let mut bytes = input.as_bytes().to_vec();
+    for codec in &codecs {
+        bytes = apply_decode(codec, &bytes)?;
+    }
+    Ok(match String::from_utf8(bytes.clone()) {
+        Ok(s) => s,
+        Err(_) => format!("(binary) {}", hex_encode(&bytes)),
+    })
+}
+
+fn apply_decode(codec: &str, bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let s = std::str::from_utf8(bytes)
+        .map_err(|_| format!("the value is binary, not text, before `{codec}`"))?;
+    match codec {
+        "base64" | "base64url" | "b64" => {
+            let norm = s
+                .trim()
+                .replace('+', "-")
+                .replace('/', "_")
+                .trim_end_matches('=')
+                .to_string();
+            nullhawk_types::jwt::base64url_decode(&norm).ok_or_else(|| "invalid base64".to_string())
+        }
+        "url" | "urldecode" => Ok(url_decode(s)),
+        "hex" => hex_decode(s),
+        other => Err(format!("unknown codec: {other}")),
+    }
+}
+
+fn url_decode(s: &str) -> Vec<u8> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                let hi = (bytes[i + 1] as char).to_digit(16);
+                let lo = (bytes[i + 2] as char).to_digit(16);
+                if let (Some(h), Some(l)) = (hi, lo) {
+                    out.push((h * 16 + l) as u8);
+                    i += 3;
+                    continue;
+                }
+                out.push(b'%');
+                i += 1;
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
+    let clean: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    if clean.len() % 2 != 0 {
+        return Err("hex input has an odd number of digits".into());
+    }
+    (0..clean.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&clean[i..i + 2], 16).map_err(|_| "invalid hex".to_string()))
+        .collect()
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn pretty(v: &Value) -> String {

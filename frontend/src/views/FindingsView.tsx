@@ -222,6 +222,7 @@ export function FindingsView({
 
   return (
     <div className="findings">
+      <h2>Findings</h2>
       <div className="toolbar">
         <label className="checkbox">
           <input

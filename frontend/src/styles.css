@@ -3183,7 +3183,11 @@ table.grid td code {
   width: 1%;
   position: sticky;
   right: 0;
+  padding-left: 12px;
   background: var(--bg-raised);
+  /* Fade whatever scrolls under the pinned column so per-row badges don't peek out behind
+     the Repeater button. */
+  box-shadow: -8px 0 8px -5px var(--bg);
 }
 .sitemap .tree tr:hover td.sitemap-actions .chip-btn {
   border-color: rgba(var(--accent-rgb), 0.4);

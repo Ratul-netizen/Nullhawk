@@ -136,11 +136,7 @@ function InterestingValues({ text }: { text: string }) {
                       <span className="muted">· via {cr.result.tool}</span>
                     </>
                   ) : (
-                    <span className="muted">
-                      {cr.result.note}
-                      {!cr.result.hashcat_available &&
-                        " — install hashcat + pick a wordlist for a GPU crack"}
-                    </span>
+                    <span className="muted">{cr.result.note}</span>
                   )}
                 </div>
               )}

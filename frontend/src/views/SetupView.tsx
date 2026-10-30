@@ -569,7 +569,7 @@ function IdentityCard({ project }: { project: ProjectSummary | null }) {
 
   if (project === null) {
     return (
-      <section className="card">
+      <section className="card identity-card">
         <h2>5 · Identities</h2>
         <p className="notice">Open a project to add the identities it tests as.</p>
       </section>
@@ -577,7 +577,7 @@ function IdentityCard({ project }: { project: ProjectSummary | null }) {
   }
 
   return (
-    <section className="card">
+    <section className="card identity-card">
       <h2>5 · Identities</h2>
       <p className="muted">
         Two or more principals, so a captured request can be replayed as somebody

@@ -330,6 +330,12 @@ input[type="text"]:focus {
   align-items: start;
 }
 
+/* The Identities card holds a table, so it takes the full row rather than one narrow grid
+   track — otherwise the Owns column clips and the row scrolls horizontally. */
+.setup .card.identity-card {
+  grid-column: 1 / -1;
+}
+
 .card {
   background: var(--bg-raised);
   border: 1px solid var(--border);

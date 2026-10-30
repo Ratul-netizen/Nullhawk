@@ -2670,6 +2670,9 @@ fn identity_renew_blocking(
 
     let mut updated = identity.clone();
     updated.credential = build_credential(&kind, value)?;
+    // Remember the login we just replayed successfully, so renew is one-click from here on
+    // (and the per-identity renew button and the topbar widget light up for this identity).
+    updated.login_request = Some(request_id);
     identities.put(&updated).map_err(fail)?;
     Ok(identity_view(&updated))
 }

@@ -544,6 +544,52 @@ td.url {
   align-items: center;
 }
 
+/* Top-bar session widget: validity at a glance + one-click renew from any view. */
+.session-widget {
+  position: relative;
+  display: inline-flex;
+}
+.session-chip {
+  cursor: pointer;
+}
+.session-chip.session-soon {
+  color: #d9b061;
+  border-color: #d9b061;
+}
+.session-chip.session-expired {
+  color: #e0917a;
+  border-color: #e0917a;
+}
+.session-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 40;
+  min-width: 270px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  padding: 6px;
+}
+.session-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 6px;
+}
+.session-name {
+  flex: 1 1 auto;
+  font-size: 12px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.session-note {
+  padding: 4px 6px 2px;
+}
+
 /* JWT crack result in the interesting-values strip. */
 .iv-crack {
   flex: 1 1 100%;

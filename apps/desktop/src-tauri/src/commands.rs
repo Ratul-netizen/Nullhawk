@@ -448,7 +448,7 @@ fn crack_cpu_file(token: &str, wordlist: &str) -> CommandResult<CrackResult> {
         }
         // A CPU HMAC pass is slow; cap it so the window never hangs. This is why hashcat
         // and a GPU matter for anything bigger than a short list.
-        if tried % 20_000 == 0 && start.elapsed().as_secs() >= 45 {
+        if tried.is_multiple_of(20_000) && start.elapsed().as_secs() >= 45 {
             break;
         }
     }

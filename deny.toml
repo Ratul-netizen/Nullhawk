@@ -78,6 +78,7 @@ exceptions = [
     { name = "nullhawk-recon", allow = ["AGPL-3.0-or-later"] },
     { name = "nullhawk-cli", allow = ["AGPL-3.0-or-later"] },
     { name = "nullhawk-desktop", allow = ["AGPL-3.0-or-later"] },
+    { name = "nullhawk-mcp", allow = ["AGPL-3.0-or-later"] },
 ]
 
 [bans]

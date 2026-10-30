@@ -139,6 +139,30 @@ fn tool_schemas() -> Value {
                 },
                 "required": ["input", "codecs"]
             }
+        },
+        {
+            "name": "fingerprint",
+            "description": "Name the stack behind each host (server, language, framework, CDN, WAF) from captured response signals. Read-only; sends nothing.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string", "description": "Path to the Nullhawk project directory." },
+                    "host": { "type": "string", "description": "Optional: only this host (bare host or host:port)." }
+                },
+                "required": ["project"]
+            }
+        },
+        {
+            "name": "sitemap",
+            "description": "The host -> path coverage the project has captured (methods and statuses per path). Read-only; sends nothing.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string", "description": "Path to the Nullhawk project directory." },
+                    "host": { "type": "string", "description": "Optional: only paths whose URL contains this host." }
+                },
+                "required": ["project"]
+            }
         }
     ])
 }
@@ -149,6 +173,8 @@ fn call_tool(name: &str, args: &Value) -> Result<String, String> {
         "findings" => tool_findings(args),
         "history" => tool_history(args),
         "decode" => tool_decode(args),
+        "fingerprint" => tool_fingerprint(args),
+        "sitemap" => tool_sitemap(args),
         _ => Err(format!("unknown tool: {name}")),
     }
 }
@@ -312,6 +338,75 @@ fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
 
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn tool_fingerprint(args: &Value) -> Result<String, String> {
+    let path = args
+        .get("project")
+        .and_then(Value::as_str)
+        .ok_or("`project` is required")?;
+    let host = args.get("host").and_then(Value::as_str);
+    let project = nullhawk_storage::Project::open(Path::new(path)).map_err(|e| e.to_string())?;
+    let store = project.traffic();
+    let report = nullhawk_recon::fingerprint::analyze(&store, host).map_err(|e| e.to_string())?;
+    let value = serde_json::to_value(&report).map_err(|e| e.to_string())?;
+    Ok(pretty(&value))
+}
+
+fn tool_sitemap(args: &Value) -> Result<String, String> {
+    let path = args
+        .get("project")
+        .and_then(Value::as_str)
+        .ok_or("`project` is required")?;
+    let host = args.get("host").and_then(Value::as_str).map(str::to_string);
+    let project = nullhawk_storage::Project::open(Path::new(path)).map_err(|e| e.to_string())?;
+    let scope = project.settings().scope().map_err(|e| e.to_string())?;
+    let store = project.traffic();
+
+    let mut pages = Vec::new();
+    let mut cursor: Option<nullhawk_storage::repository::Cursor> = None;
+    loop {
+        let page = store
+            .history(cursor.as_ref(), nullhawk_storage::repository::Limit::new(500))
+            .map_err(|e| e.to_string())?;
+        for item in &page.items {
+            if let Some(h) = &host {
+                if !item.url.contains(h.as_str()) {
+                    continue;
+                }
+            }
+            pages.push(nullhawk_crawl::CapturedPage {
+                url: item.url.clone(),
+                method: item.method.clone(),
+                status: item.status,
+                identity: item.identity.clone(),
+                content_type: String::new(),
+                body: Vec::new(),
+            });
+        }
+        match page.next {
+            Some(n) => cursor = Some(n),
+            None => break,
+        }
+    }
+
+    let map = nullhawk_crawl::SiteMap::build(pages, &scope);
+    let hosts: Vec<Value> = map
+        .hosts
+        .iter()
+        .map(|h| {
+            json!({
+                "host": h.host,
+                "secure": h.secure,
+                "paths": h
+                    .paths
+                    .iter()
+                    .map(|p| json!({ "path": p.path, "methods": p.methods, "statuses": p.statuses }))
+                    .collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    Ok(pretty(&json!({ "hosts": hosts })))
 }
 
 fn pretty(v: &Value) -> String {

@@ -2765,6 +2765,8 @@ dependencies = [
 name = "nullhawk-mcp"
 version = "0.1.0"
 dependencies = [
+ "nullhawk-crawl",
+ "nullhawk-recon",
  "nullhawk-storage",
  "nullhawk-types",
  "serde_json",

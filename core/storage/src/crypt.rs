@@ -76,6 +76,13 @@ fn load_or_create_dek() -> Result<[u8; 32]> {
             .map_err(|_| crypto(format!("{KEY_ENV} must decode to exactly 32 bytes")));
     }
 
+    dek_from_os_keystore()
+}
+
+/// On Windows and macOS the DEK lives in the native OS keystore (Windows Credential
+/// Manager / macOS Keychain), generated on first use.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn dek_from_os_keystore() -> Result<[u8; 32]> {
     let entry = keyring::Entry::new(SERVICE, ACCOUNT).map_err(crypto)?;
     match entry.get_password() {
         Ok(stored) => {
@@ -94,6 +101,18 @@ fn load_or_create_dek() -> Result<[u8; 32]> {
         }
         Err(e) => Err(crypto(e)),
     }
+}
+
+/// Elsewhere (Linux, BSD, headless) there is no keystore integration. Rather than fall
+/// back to an in-memory store that loses the key on restart — which would leave sealed
+/// credentials permanently unreadable — require the key to be supplied explicitly. Fails
+/// closed, so credentials are never written under a key that will vanish.
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn dek_from_os_keystore() -> Result<[u8; 32]> {
+    Err(crypto(format!(
+        "credential encryption uses the OS keystore, which is integrated on Windows and \
+         macOS only. On this platform, set {KEY_ENV} to a base64-encoded 32-byte key."
+    )))
 }
 
 fn to_key(bytes: &[u8]) -> std::result::Result<[u8; 32], ()> {

@@ -149,6 +149,7 @@ export interface MobileSetup {
   onboarding_running: boolean;
   onboarding_port: number | null;
   onboarding_url: string | null;
+  onboarding_qr_svg: string | null;
   ca_present: boolean;
   ca_fingerprint: string | null;
   ca_path: string;

@@ -72,12 +72,40 @@ pub struct MobileSetup {
     pub onboarding_port: Option<u16>,
     /// The URL a phone opens to get the CA and the setup page (needs a LAN IP).
     pub onboarding_url: Option<String>,
+    /// An SVG QR code of `onboarding_url` so the phone can scan it instead of typing.
+    pub onboarding_qr_svg: Option<String>,
     /// Whether the CA certificate exists on disk.
     pub ca_present: bool,
     /// Its SHA-256 fingerprint, for the tester to verify on the device.
     pub ca_fingerprint: Option<String>,
     /// Where the certificate lives on disk, for a manual transfer if preferred.
     pub ca_path: String,
+}
+
+/// Renders `data` as a minimal SVG QR code (its viewBox is in module units, so the page
+/// scales it to any size). White field with a quiet-zone border so it scans against a dark
+/// UI. Uses only the core matrix API, so the SVG is ours and there is no render feature to
+/// depend on.
+fn qr_svg(data: &str) -> Option<String> {
+    let code = qrcode::QrCode::new(data.as_bytes()).ok()?;
+    let w = code.width();
+    let colors = code.to_colors();
+    const QUIET: usize = 4;
+    let dim = w + QUIET * 2;
+    let mut rects = String::new();
+    for y in 0..w {
+        for x in 0..w {
+            if colors[y * w + x] == qrcode::Color::Dark {
+                let (px, py) = (x + QUIET, y + QUIET);
+                rects.push_str(&format!(
+                    r#"<rect x="{px}" y="{py}" width="1" height="1"/>"#
+                ));
+            }
+        }
+    }
+    Some(format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {dim} {dim}" shape-rendering="crispEdges"><rect width="{dim}" height="{dim}" fill="#fff"/><g fill="#000">{rects}</g></svg>"##
+    ))
 }
 
 fn build_setup(state: &AppState) -> CommandResult<MobileSetup> {
@@ -92,6 +120,7 @@ fn build_setup(state: &AppState) -> CommandResult<MobileSetup> {
         (Some(ip), Some(port)) => Some(format!("http://{ip}:{port}/")),
         _ => None,
     };
+    let onboarding_qr_svg = onboarding_url.as_deref().and_then(qr_svg);
 
     let dir = ca_dir()?;
     let path = dir.join(CA_FILE);
@@ -109,6 +138,7 @@ fn build_setup(state: &AppState) -> CommandResult<MobileSetup> {
         onboarding_running: onboarding_addr.is_some(),
         onboarding_port,
         onboarding_url,
+        onboarding_qr_svg,
         ca_present: path.exists(),
         ca_fingerprint,
         ca_path: path.display().to_string(),

@@ -147,6 +147,16 @@ export function MobileView() {
             )}
           </p>
         )}
+        {setup?.onboarding_running && setup.onboarding_qr_svg && (
+          <div className="mobile-qr-wrap">
+            <div
+              className="mobile-qr"
+              aria-label="QR code for the setup URL"
+              dangerouslySetInnerHTML={{ __html: setup.onboarding_qr_svg }}
+            />
+            <span className="muted small">Scan to open the setup page on the phone.</span>
+          </div>
+        )}
 
         <dl className="facts">
           <dt>Fingerprint</dt>

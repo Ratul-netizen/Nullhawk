@@ -84,6 +84,7 @@ pub fn run() {
             mobile::mobile_onboarding_stop,
             mobile::mobile_analyze,
             cloud::cloud_validate_aws,
+            cloud::cloud_validate_gcp,
             commands::scope_list,
             commands::scope_add,
             commands::scope_remove,

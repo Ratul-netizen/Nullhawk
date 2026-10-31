@@ -14,12 +14,14 @@
 //! Signing is AWS Signature Version 4, built here on `ring` (HMAC-SHA256 + SHA-256) — no
 //! AWS SDK, which would be an enormous dependency for one call.
 
+use base64::Engine as _;
 use bytes::Bytes;
 use nullhawk_engine::transport::{HttpTransport, Origin, SendOptions};
 use nullhawk_http::TcpTransport;
 use nullhawk_types::http::{Headers, HttpRequest, HttpService, HttpVersion};
-use ring::{digest, hmac};
-use serde::Serialize;
+use nullhawk_types::jwt::base64url_encode;
+use ring::{digest, hmac, rand, signature};
+use serde::{Deserialize, Serialize};
 
 type CommandResult<T> = std::result::Result<T, String>;
 
@@ -213,6 +215,210 @@ pub async fn cloud_validate_aws(
     Ok(interpret(status, &body))
 }
 
+// ---------------------------------------------------------------------------
+// GCP — validate a leaked service-account key
+// ---------------------------------------------------------------------------
+//
+// A GCP service-account key is a JSON file holding an RSA private key and the account's
+// email. Unlike AWS there is no "who am I" call that returns an identity without a token,
+// so validation mints one: sign a JWT assertion with the key and exchange it at Google's
+// OAuth token endpoint (the standard jwt-bearer grant). A 200 with an access_token proves
+// the key is live and names the service account; an `invalid_grant` proves it is not.
+//
+// The requested scope is cloud-platform **read-only** and the token is never used or
+// stored — we only need the endpoint's yes/no. Only validate keys you are authorised to
+// test. The request goes to the key's own `token_uri` (oauth2.googleapis.com) and nowhere
+// else. Signing is RS256 on `ring`; no Google SDK.
+
+const GCP_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform.read-only";
+// grant_type with its colons percent-encoded for the form body.
+const GCP_GRANT_TYPE: &str = "urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer";
+
+fn default_token_uri() -> String {
+    "https://oauth2.googleapis.com/token".to_string()
+}
+
+/// The fields we read from a service-account key JSON (the rest are ignored).
+#[derive(Debug, Clone, Deserialize)]
+struct ServiceAccountKey {
+    #[serde(default)]
+    client_email: String,
+    #[serde(default)]
+    private_key: String,
+    #[serde(default)]
+    private_key_id: String,
+    #[serde(default = "default_token_uri")]
+    token_uri: String,
+    #[serde(default)]
+    project_id: String,
+}
+
+/// The answer to "is this GCP service-account key live, and whose is it?".
+#[derive(Debug, Clone, Serialize)]
+pub struct GcpIdentity {
+    /// Whether the key minted a token.
+    pub valid: bool,
+    /// The service account's email (from the key file).
+    pub client_email: Option<String>,
+    /// The project the key belongs to (from the key file), when present.
+    pub project_id: Option<String>,
+    /// Google's OAuth error code when the key did not authenticate (e.g. invalid_grant).
+    pub error: Option<String>,
+    /// Google's error description, when present.
+    pub error_description: Option<String>,
+    /// A one-line human summary.
+    pub note: String,
+}
+
+/// Decodes a PEM private key (any `-----BEGIN…-----` armour) to its DER bytes.
+fn pem_to_der(pem: &str) -> Option<Vec<u8>> {
+    let body: String = pem
+        .lines()
+        .filter(|l| !l.starts_with("-----"))
+        .flat_map(|l| l.chars())
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    base64::engine::general_purpose::STANDARD.decode(body).ok()
+}
+
+/// The JWT claim set for a service-account assertion, as compact JSON.
+fn sa_claims(sa: &ServiceAccountKey, iat: i64, exp: i64) -> String {
+    format!(
+        r#"{{"iss":"{iss}","scope":"{GCP_SCOPE}","aud":"{aud}","iat":{iat},"exp":{exp}}}"#,
+        iss = sa.client_email,
+        aud = sa.token_uri,
+    )
+}
+
+/// Signs the `header.claims` input with the account's RSA key (RS256), returning the
+/// complete JWT assertion.
+fn sign_assertion(sa: &ServiceAccountKey, iat: i64, exp: i64) -> CommandResult<String> {
+    let header = format!(
+        r#"{{"alg":"RS256","typ":"JWT","kid":"{}"}}"#,
+        sa.private_key_id
+    );
+    let signing_input = format!(
+        "{}.{}",
+        base64url_encode(header.as_bytes()),
+        base64url_encode(sa_claims(sa, iat, exp).as_bytes())
+    );
+
+    let der = pem_to_der(&sa.private_key)
+        .ok_or_else(|| "the private_key is not valid PEM".to_string())?;
+    let key_pair = signature::RsaKeyPair::from_pkcs8(&der)
+        .map_err(|e| format!("the private_key is not a PKCS#8 RSA key: {e}"))?;
+    let rng = rand::SystemRandom::new();
+    let mut sig = vec![0u8; key_pair.public().modulus_len()];
+    key_pair
+        .sign(
+            &signature::RSA_PKCS1_SHA256,
+            &rng,
+            signing_input.as_bytes(),
+            &mut sig,
+        )
+        .map_err(|_| "signing the assertion failed".to_string())?;
+    Ok(format!("{signing_input}.{}", base64url_encode(&sig)))
+}
+
+/// The host portion of a URL, for the Host header.
+fn host_of(url: &str) -> String {
+    url.split("://")
+        .nth(1)
+        .unwrap_or(url)
+        .split('/')
+        .next()
+        .unwrap_or(url)
+        .to_string()
+}
+
+fn interpret_gcp(sa: &ServiceAccountKey, status: u16, body: &[u8]) -> GcpIdentity {
+    let json: serde_json::Value = serde_json::from_slice(body).unwrap_or(serde_json::Value::Null);
+    let client_email = (!sa.client_email.is_empty()).then(|| sa.client_email.clone());
+    let project_id = (!sa.project_id.is_empty()).then(|| sa.project_id.clone());
+
+    let has_token = json
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .is_some_and(|t| !t.is_empty());
+
+    if status == 200 && has_token {
+        let note = match &client_email {
+            Some(e) => format!("Live key — {e}"),
+            None => "Live key (a token was issued)".to_string(),
+        };
+        GcpIdentity {
+            valid: true,
+            client_email,
+            project_id,
+            error: None,
+            error_description: None,
+            note,
+        }
+    } else {
+        let error = json
+            .get("error")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let error_description = json
+            .get("error_description")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let note = match &error {
+            Some(e) => format!("Not a valid key: {e}"),
+            None => format!("Not a valid key (HTTP {status})"),
+        };
+        GcpIdentity {
+            valid: false,
+            client_email,
+            project_id,
+            error,
+            error_description,
+            note,
+        }
+    }
+}
+
+/// Validates a GCP service-account key by minting a read-only token with it. The key never
+/// leaves this machine except as a signed assertion to its own token endpoint.
+#[tauri::command]
+pub async fn cloud_validate_gcp(key_json: String) -> CommandResult<GcpIdentity> {
+    let sa: ServiceAccountKey = serde_json::from_str(key_json.trim())
+        .map_err(|e| format!("that is not a service-account key JSON: {e}"))?;
+    if sa.client_email.is_empty() || sa.private_key.is_empty() {
+        return Err("the key JSON needs both client_email and private_key".into());
+    }
+
+    let now = chrono::Utc::now().timestamp();
+    let assertion = sign_assertion(&sa, now, now + 3600)?;
+    let body = format!("grant_type={GCP_GRANT_TYPE}&assertion={assertion}");
+
+    let (service, path) = HttpService::parse_url(&sa.token_uri).map_err(|e| e.to_string())?;
+    let host = host_of(&sa.token_uri);
+    let mut headers = Headers::new();
+    headers.set("Host", &host);
+    headers.set("Content-Type", "application/x-www-form-urlencoded");
+    headers.set("Content-Length", body.len().to_string());
+    let request = HttpRequest {
+        service,
+        method: "POST".to_string(),
+        path,
+        version: HttpVersion::Http11,
+        headers,
+        body: Bytes::from(body),
+    };
+
+    let exchange = TcpTransport::new()
+        .send(request, SendOptions::interactive(Origin::Repeater))
+        .await
+        .map_err(|e| format!("could not reach the Google token endpoint: {e}"))?;
+
+    Ok(interpret_gcp(
+        &sa,
+        exchange.response.status,
+        &exchange.response.body,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,5 +495,69 @@ mod tests {
         assert!(!id.valid);
         assert_eq!(id.error_code.as_deref(), Some("InvalidClientTokenId"));
         assert!(id.note.contains("InvalidClientTokenId"));
+    }
+
+    // --- GCP -------------------------------------------------------------------------
+
+    fn test_sa() -> ServiceAccountKey {
+        ServiceAccountKey {
+            client_email: "svc@proj.iam.gserviceaccount.com".to_string(),
+            private_key: String::new(),
+            private_key_id: "kid123".to_string(),
+            token_uri: default_token_uri(),
+            project_id: "proj".to_string(),
+        }
+    }
+
+    #[test]
+    fn pem_to_der_strips_armour_and_decodes() {
+        let der = [1u8, 2, 3, 4, 5, 6, 7, 8];
+        let b64 = base64::engine::general_purpose::STANDARD.encode(der);
+        // Split across lines, as real PEM is wrapped.
+        let pem = format!(
+            "-----BEGIN PRIVATE KEY-----\n{}\n{}\n-----END PRIVATE KEY-----\n",
+            &b64[..4],
+            &b64[4..]
+        );
+        assert_eq!(pem_to_der(&pem).as_deref(), Some(der.as_slice()));
+    }
+
+    #[test]
+    fn the_assertion_claims_name_the_account_and_scope() {
+        let claims = sa_claims(&test_sa(), 1_700_000_000, 1_700_003_600);
+        assert!(claims.contains(r#""iss":"svc@proj.iam.gserviceaccount.com""#));
+        assert!(claims.contains("cloud-platform.read-only"));
+        assert!(claims.contains("oauth2.googleapis.com/token"));
+        assert!(claims.contains(r#""exp":1700003600"#));
+    }
+
+    #[test]
+    fn host_of_reads_the_authority() {
+        assert_eq!(host_of("https://oauth2.googleapis.com/token"), "oauth2.googleapis.com");
+    }
+
+    #[test]
+    fn interprets_a_live_gcp_token() {
+        let body = br#"{"access_token":"ya29.redacted","expires_in":3599,"token_type":"Bearer"}"#;
+        let id = interpret_gcp(&test_sa(), 200, body);
+        assert!(id.valid);
+        assert_eq!(
+            id.client_email.as_deref(),
+            Some("svc@proj.iam.gserviceaccount.com")
+        );
+        assert_eq!(id.project_id.as_deref(), Some("proj"));
+    }
+
+    #[test]
+    fn interprets_an_invalid_gcp_key() {
+        let body = br#"{"error":"invalid_grant","error_description":"Invalid JWT Signature."}"#;
+        let id = interpret_gcp(&test_sa(), 400, body);
+        assert!(!id.valid);
+        assert_eq!(id.error.as_deref(), Some("invalid_grant"));
+        assert_eq!(
+            id.error_description.as_deref(),
+            Some("Invalid JWT Signature.")
+        );
+        assert!(id.note.contains("invalid_grant"));
     }
 }

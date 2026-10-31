@@ -2663,6 +2663,7 @@ dependencies = [
 name = "nullhawk-desktop"
 version = "0.1.0"
 dependencies = [
+ "base64 0.21.7",
  "bytes",
  "chrono",
  "flate2",

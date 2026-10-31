@@ -13,9 +13,11 @@ import { generateBypasses, type BypassCandidate } from "../lib/bypass";
 import {
   bypassRun,
   cloudValidateAws,
+  cloudValidateGcp,
   describeError,
   type BypassResult,
   type AwsIdentity,
+  type GcpIdentity,
 } from "../ipc";
 import { TRANSFORMS, runPipeline, transformById } from "../lib/transforms";
 import { convert, detectFormat, type BodyFormat } from "../lib/convert";
@@ -213,7 +215,88 @@ function CloudPanel() {
           )}
         </section>
       )}
+
+      <GcpKeyPanel />
     </div>
+  );
+}
+
+function GcpKeyPanel() {
+  const [keyJson, setKeyJson] = useState("");
+  const [result, setResult] = useState<GcpIdentity | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const validate = async () => {
+    setBusy(true);
+    setError(null);
+    setResult(null);
+    try {
+      setResult(await cloudValidateGcp(keyJson));
+    } catch (e) {
+      setError(describeError(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <section className="card">
+        <h2>Cloud key check — GCP</h2>
+        <p className="muted">
+          Confirm a leaked GCP <em>service-account key</em> is live and learn which account
+          it is. Nullhawk signs a read-only token request with the key and exchanges it at
+          the key's own <code>token_uri</code> (<code>oauth2.googleapis.com</code>) — the
+          token is never used. Only validate keys you are authorised to test.
+        </p>
+        <label>
+          Service-account key JSON
+          <textarea
+            className="mono"
+            rows={6}
+            value={keyJson}
+            spellCheck={false}
+            placeholder={'{ "type": "service_account", "project_id": "…", "private_key": "-----BEGIN PRIVATE KEY-----…", "client_email": "…" }'}
+            onChange={(e) => setKeyJson(e.target.value)}
+          />
+        </label>
+        <div className="row-actions" style={{ marginTop: 12 }}>
+          <button onClick={validate} disabled={busy || keyJson.trim() === ""}>
+            {busy ? "Checking…" : "Validate"}
+          </button>
+        </div>
+        {error && <p className="notice warn">{error}</p>}
+      </section>
+
+      {result && (
+        <section className="card">
+          <h3>
+            {result.valid ? (
+              <span className="tag insecure">LIVE</span>
+            ) : (
+              <span className="tag">not valid</span>
+            )}{" "}
+            {result.note}
+          </h3>
+          {result.valid ? (
+            <dl className="facts">
+              <dt>Service account</dt>
+              <dd className="mono small">{result.client_email ?? "—"}</dd>
+              <dt>Project</dt>
+              <dd className="mono small">{result.project_id ?? "—"}</dd>
+            </dl>
+          ) : (
+            <dl className="facts">
+              <dt>Error</dt>
+              <dd className="mono small">{result.error ?? "—"}</dd>
+              <dt>Description</dt>
+              <dd className="small">{result.error_description ?? "—"}</dd>
+            </dl>
+          )}
+        </section>
+      )}
+    </>
   );
 }
 

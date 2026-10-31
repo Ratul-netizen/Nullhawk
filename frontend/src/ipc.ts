@@ -853,6 +853,19 @@ export const cloudValidateAws = (
   sessionToken: string | null,
 ): Promise<AwsIdentity> =>
   invoke<AwsIdentity>("cloud_validate_aws", { accessKey, secret, sessionToken });
+
+/** The result of validating a leaked GCP service-account key against Google's OAuth token endpoint. */
+export interface GcpIdentity {
+  valid: boolean;
+  client_email: string | null;
+  project_id: string | null;
+  error: string | null;
+  error_description: string | null;
+  note: string;
+}
+
+export const cloudValidateGcp = (keyJson: string): Promise<GcpIdentity> =>
+  invoke<GcpIdentity>("cloud_validate_gcp", { keyJson });
 export const mobileOnboardingStart = (): Promise<MobileSetup> =>
   invoke<MobileSetup>("mobile_onboarding_start");
 export const mobileOnboardingStop = (): Promise<MobileSetup> =>

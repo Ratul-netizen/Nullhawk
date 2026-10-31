@@ -394,6 +394,108 @@ pub struct MobilePackage {
     pub strings: String,
     /// Set when extraction hit a cap, so the UI can say the view is partial.
     pub note: Option<String>,
+    /// Structured facts decoded from the package manifest (IPA Info.plist for now).
+    pub manifest: Option<ManifestFacts>,
+}
+
+/// Platform facts read from an app's manifest, with the security-relevant ones called out.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ManifestFacts {
+    /// "ios" (APK/AndroidManifest support is a later increment).
+    pub platform: String,
+    pub bundle_id: Option<String>,
+    pub min_os: Option<String>,
+    /// NSAllowsArbitraryLoads — true means App Transport Security is off app-wide.
+    pub ats_arbitrary_loads: Option<bool>,
+    /// Domains with their own ATS exceptions.
+    pub ats_exception_domains: Vec<String>,
+    /// Custom URL schemes the app registers (deep-link entry points).
+    pub url_schemes: Vec<String>,
+    /// Declared privacy-sensitive capabilities (the *UsageDescription keys).
+    pub permissions: Vec<String>,
+    /// Human-readable findings derived from the above.
+    pub issues: Vec<String>,
+}
+
+/// Decodes an IPA's top-level Info.plist into structured facts, or None if it is absent or
+/// unreadable. `label` is the `<App>.app` directory name.
+fn ipa_manifest(data: &[u8], entries: &[ZipEntry], label: &str) -> Option<ManifestFacts> {
+    let want = format!("Payload/{label}/Info.plist");
+    let entry = entries.iter().find(|e| e.name == want)?;
+    let bytes = zip_read_entry(data, entry, 4 * 1024 * 1024)?;
+    let value = plist::Value::from_reader(std::io::Cursor::new(bytes)).ok()?;
+    let dict = value.as_dictionary()?;
+
+    let s = |k: &str| dict.get(k).and_then(|v| v.as_string()).map(str::to_string);
+
+    let ats = dict
+        .get("NSAppTransportSecurity")
+        .and_then(|v| v.as_dictionary());
+    let ats_arbitrary_loads = ats
+        .and_then(|a| a.get("NSAllowsArbitraryLoads"))
+        .and_then(|v| v.as_boolean());
+    let ats_exception_domains: Vec<String> = ats
+        .and_then(|a| a.get("NSExceptionDomains"))
+        .and_then(|v| v.as_dictionary())
+        .map(|d| d.keys().cloned().collect())
+        .unwrap_or_default();
+
+    let url_schemes: Vec<String> = dict
+        .get("CFBundleURLTypes")
+        .and_then(|v| v.as_array())
+        .map(|types| {
+            types
+                .iter()
+                .filter_map(|t| t.as_dictionary())
+                .filter_map(|t| t.get("CFBundleURLSchemes"))
+                .filter_map(|v| v.as_array())
+                .flatten()
+                .filter_map(|s| s.as_string())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let permissions: Vec<String> = dict
+        .iter()
+        .filter(|(k, _)| k.ends_with("UsageDescription"))
+        .map(|(k, _)| k.clone())
+        .collect();
+
+    let mut issues = Vec::new();
+    if ats_arbitrary_loads == Some(true) {
+        issues.push(
+            "App Transport Security is disabled app-wide (NSAllowsArbitraryLoads = true): \
+             cleartext and weak-TLS connections are permitted."
+                .to_string(),
+        );
+    }
+    if !ats_exception_domains.is_empty() {
+        issues.push(format!(
+            "App Transport Security has per-domain exceptions for {} domain(s); review each for \
+             allowed cleartext or lowered TLS.",
+            ats_exception_domains.len()
+        ));
+    }
+    if !url_schemes.is_empty() {
+        issues.push(format!(
+            "Registers {} custom URL scheme(s): {}. Deep-link handlers should validate every \
+             incoming parameter.",
+            url_schemes.len(),
+            url_schemes.join(", ")
+        ));
+    }
+
+    Some(ManifestFacts {
+        platform: "ios".to_string(),
+        bundle_id: s("CFBundleIdentifier"),
+        min_os: s("MinimumOSVersion"),
+        ats_arbitrary_loads,
+        ats_exception_domains,
+        url_schemes,
+        permissions,
+        issues,
+    })
 }
 
 struct ZipEntry {
@@ -576,6 +678,12 @@ pub fn mobile_analyze(path: String) -> CommandResult<MobilePackage> {
     let strings = set.into_iter().collect::<Vec<_>>().join("\n");
     let note = truncated.then(|| "String extraction was capped; the view is partial.".to_string());
 
+    let manifest = if kind == "ipa" {
+        ipa_manifest(&data, &entries, &label)
+    } else {
+        None
+    };
+
     Ok(MobilePackage {
         kind: kind.to_string(),
         label,
@@ -583,6 +691,7 @@ pub fn mobile_analyze(path: String) -> CommandResult<MobilePackage> {
         total_size,
         strings,
         note,
+        manifest,
     })
 }
 
@@ -678,5 +787,33 @@ mod tests {
     #[test]
     fn a_non_archive_has_no_entries() {
         assert!(zip_entries(b"this is not a zip file at all").is_empty());
+    }
+
+    #[test]
+    fn decodes_an_ipa_info_plist() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>com.example.test</string>
+  <key>MinimumOSVersion</key><string>14.0</string>
+  <key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoads</key><true/></dict>
+  <key>CFBundleURLTypes</key><array><dict><key>CFBundleURLSchemes</key><array><string>myapp</string></array></dict></array>
+  <key>NSCameraUsageDescription</key><string>needs camera</string>
+</dict></plist>"#;
+        let zip = build_zip("Payload/Test.app/Info.plist", xml.as_bytes());
+        let entries = zip_entries(&zip);
+        let facts = ipa_manifest(&zip, &entries, "Test.app").expect("decodes");
+
+        assert_eq!(facts.bundle_id.as_deref(), Some("com.example.test"));
+        assert_eq!(facts.min_os.as_deref(), Some("14.0"));
+        assert_eq!(facts.ats_arbitrary_loads, Some(true));
+        assert!(facts.url_schemes.iter().any(|s| s == "myapp"));
+        assert!(facts
+            .permissions
+            .iter()
+            .any(|p| p == "NSCameraUsageDescription"));
+        assert!(
+            !facts.issues.is_empty(),
+            "ATS-off and URL schemes should raise findings"
+        );
     }
 }

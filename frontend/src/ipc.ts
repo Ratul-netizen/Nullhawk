@@ -809,6 +809,18 @@ export const branchesOf = (id: string): Promise<HistoryRow[]> =>
 
 export const caStatus = (): Promise<CaStatus> => invoke<CaStatus>("ca_status");
 
+/** Platform facts decoded from a package manifest (IPA Info.plist). */
+export interface ManifestFacts {
+  platform: string;
+  bundle_id: string | null;
+  min_os: string | null;
+  ats_arbitrary_loads: boolean | null;
+  ats_exception_domains: string[];
+  url_schemes: string[];
+  permissions: string[];
+  issues: string[];
+}
+
 /** What a dropped APK/IPA is, plus the strings pulled out of it for the miner. */
 export interface MobilePackage {
   kind: string;
@@ -817,6 +829,7 @@ export interface MobilePackage {
   total_size: number;
   strings: string;
   note: string | null;
+  manifest: ManifestFacts | null;
 }
 
 export const mobileSetup = (): Promise<MobileSetup> => invoke<MobileSetup>("mobile_setup");

@@ -223,6 +223,55 @@ export function MobileView() {
           )}
         </div>
         {pkgError && <p className="notice warn">{pkgError}</p>}
+        {pkg?.manifest && (
+          <div className="card" style={{ marginBottom: 12 }}>
+            <h3>Platform (Info.plist)</h3>
+            <dl className="facts">
+              {pkg.manifest.bundle_id && (
+                <>
+                  <dt>Bundle ID</dt>
+                  <dd className="mono small">{pkg.manifest.bundle_id}</dd>
+                </>
+              )}
+              {pkg.manifest.min_os && (
+                <>
+                  <dt>Min OS</dt>
+                  <dd className="mono small">{pkg.manifest.min_os}</dd>
+                </>
+              )}
+              <dt>ATS arbitrary loads</dt>
+              <dd className={pkg.manifest.ats_arbitrary_loads ? "insecure" : "ok"}>
+                {pkg.manifest.ats_arbitrary_loads === null
+                  ? "default (not set)"
+                  : pkg.manifest.ats_arbitrary_loads
+                    ? "ENABLED — ATS off"
+                    : "disabled — ATS on"}
+              </dd>
+              {pkg.manifest.url_schemes.length > 0 && (
+                <>
+                  <dt>URL schemes</dt>
+                  <dd className="mono small">{pkg.manifest.url_schemes.join(", ")}</dd>
+                </>
+              )}
+              {pkg.manifest.permissions.length > 0 && (
+                <>
+                  <dt>Permissions</dt>
+                  <dd className="small">{pkg.manifest.permissions.join(", ")}</dd>
+                </>
+              )}
+            </dl>
+            {pkg.manifest.issues.length > 0 && (
+              <ul className="mine-list">
+                {pkg.manifest.issues.map((iss, i) => (
+                  <li key={i}>
+                    <span className="tag insecure">finding</span>
+                    <span className="small">{iss}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
         {pkg && mined && (
           <div className="miner-grid">
             <section className="card">

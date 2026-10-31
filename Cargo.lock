@@ -2687,6 +2687,7 @@ dependencies = [
  "nullhawk-storage",
  "nullhawk-types",
  "nullhawk-verify",
+ "plist",
  "qrcode",
  "rfd",
  "serde",

@@ -835,6 +835,24 @@ export interface MobilePackage {
 export const mobileSetup = (): Promise<MobileSetup> => invoke<MobileSetup>("mobile_setup");
 export const mobileAnalyze = (path: string): Promise<MobilePackage> =>
   invoke<MobilePackage>("mobile_analyze", { path });
+
+/** The result of validating a leaked AWS key against STS GetCallerIdentity. */
+export interface AwsIdentity {
+  valid: boolean;
+  arn: string | null;
+  account: string | null;
+  user_id: string | null;
+  error_code: string | null;
+  error_message: string | null;
+  note: string;
+}
+
+export const cloudValidateAws = (
+  accessKey: string,
+  secret: string,
+  sessionToken: string | null,
+): Promise<AwsIdentity> =>
+  invoke<AwsIdentity>("cloud_validate_aws", { accessKey, secret, sessionToken });
 export const mobileOnboardingStart = (): Promise<MobileSetup> =>
   invoke<MobileSetup>("mobile_onboarding_start");
 export const mobileOnboardingStop = (): Promise<MobileSetup> =>

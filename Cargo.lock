@@ -2690,6 +2690,7 @@ dependencies = [
  "plist",
  "qrcode",
  "rfd",
+ "ring",
  "serde",
  "serde_json",
  "tauri",

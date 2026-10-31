@@ -47,6 +47,7 @@ bytes.workspace = true
 qrcode.workspace = true
 flate2.workspace = true
 plist.workspace = true
+ring.workspace = true
 chrono.workspace = true
 tokio.workspace = true
 tauri.workspace = true

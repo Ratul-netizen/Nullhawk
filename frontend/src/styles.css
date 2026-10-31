@@ -369,6 +369,23 @@ input[type="text"]:focus {
   height: 100%;
 }
 
+/* Cloud key check form: a simple stacked set of labelled inputs. */
+.form-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 560px;
+}
+.form-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.9rem;
+}
+.form-grid input {
+  width: 100%;
+}
+
 .card {
   background: var(--bg-raised);
   border: 1px solid var(--border);

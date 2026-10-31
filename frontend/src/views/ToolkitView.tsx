@@ -10,7 +10,13 @@ import {
 } from "../lib/jwt";
 import { mine, type MineResult } from "../lib/miner";
 import { generateBypasses, type BypassCandidate } from "../lib/bypass";
-import { bypassRun, describeError, type BypassResult } from "../ipc";
+import {
+  bypassRun,
+  cloudValidateAws,
+  describeError,
+  type BypassResult,
+  type AwsIdentity,
+} from "../ipc";
 import { TRANSFORMS, runPipeline, transformById } from "../lib/transforms";
 import { convert, detectFormat, type BodyFormat } from "../lib/convert";
 import {
@@ -37,7 +43,8 @@ type Tool =
   | "convert"
   | "payloads"
   | "cvss"
-  | "bypass";
+  | "bypass"
+  | "cloud";
 
 export function ToolkitView({ hasProject }: { hasProject: boolean }) {
   const [tool, setTool] = useState<Tool>("jwt");
@@ -86,6 +93,12 @@ export function ToolkitView({ hasProject }: { hasProject: boolean }) {
         >
           403 / WAF bypass
         </button>
+        <button
+          className={tool === "cloud" ? "seg-btn on" : "seg-btn"}
+          onClick={() => setTool("cloud")}
+        >
+          Cloud key check
+        </button>
       </div>
       {tool === "jwt" && <JwtPanel />}
       {tool === "miner" && <MinerPanel />}
@@ -94,6 +107,112 @@ export function ToolkitView({ hasProject }: { hasProject: boolean }) {
       {tool === "payloads" && <PayloadsPanel />}
       {tool === "cvss" && <CvssPanel />}
       {tool === "bypass" && <BypassPanel hasProject={hasProject} />}
+      {tool === "cloud" && <CloudPanel />}
+    </div>
+  );
+}
+
+function CloudPanel() {
+  const [accessKey, setAccessKey] = useState("");
+  const [secret, setSecret] = useState("");
+  const [sessionToken, setSessionToken] = useState("");
+  const [result, setResult] = useState<AwsIdentity | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const validate = async () => {
+    setBusy(true);
+    setError(null);
+    setResult(null);
+    try {
+      setResult(await cloudValidateAws(accessKey, secret, sessionToken.trim() || null));
+    } catch (e) {
+      setError(describeError(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="cloud-key">
+      <section className="card">
+        <h2>Cloud key check — AWS</h2>
+        <p className="muted">
+          Confirm a leaked AWS access key is live and learn whose it is, via STS{" "}
+          <code>GetCallerIdentity</code> — one read-only call that touches no resource. Only
+          validate keys you are authorised to test. The request goes to{" "}
+          <code>sts.amazonaws.com</code> and nowhere else.
+        </p>
+        <div className="form-grid">
+          <label>
+            Access key id
+            <input
+              className="mono"
+              value={accessKey}
+              spellCheck={false}
+              placeholder="AKIA…"
+              onChange={(e) => setAccessKey(e.target.value)}
+            />
+          </label>
+          <label>
+            Secret access key
+            <input
+              className="mono"
+              type="password"
+              value={secret}
+              spellCheck={false}
+              placeholder="…"
+              onChange={(e) => setSecret(e.target.value)}
+            />
+          </label>
+          <label>
+            Session token <span className="muted small">(optional)</span>
+            <input
+              className="mono"
+              value={sessionToken}
+              spellCheck={false}
+              placeholder="for temporary credentials"
+              onChange={(e) => setSessionToken(e.target.value)}
+            />
+          </label>
+        </div>
+        <div className="row-actions" style={{ marginTop: 12 }}>
+          <button onClick={validate} disabled={busy || !accessKey || !secret}>
+            {busy ? "Checking…" : "Validate"}
+          </button>
+        </div>
+        {error && <p className="notice warn">{error}</p>}
+      </section>
+
+      {result && (
+        <section className={result.valid ? "card" : "card"}>
+          <h3>
+            {result.valid ? (
+              <span className="tag insecure">LIVE</span>
+            ) : (
+              <span className="tag">not valid</span>
+            )}{" "}
+            {result.note}
+          </h3>
+          {result.valid ? (
+            <dl className="facts">
+              <dt>ARN</dt>
+              <dd className="mono small">{result.arn ?? "—"}</dd>
+              <dt>Account</dt>
+              <dd className="mono small">{result.account ?? "—"}</dd>
+              <dt>User id</dt>
+              <dd className="mono small">{result.user_id ?? "—"}</dd>
+            </dl>
+          ) : (
+            <dl className="facts">
+              <dt>Code</dt>
+              <dd className="mono small">{result.error_code ?? "—"}</dd>
+              <dt>Message</dt>
+              <dd className="small">{result.error_message ?? "—"}</dd>
+            </dl>
+          )}
+        </section>
+      )}
     </div>
   );
 }

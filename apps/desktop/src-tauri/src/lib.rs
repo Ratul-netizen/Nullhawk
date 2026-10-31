@@ -25,6 +25,7 @@
 //! holds only what it is currently rendering, and re-asks after anything that could
 //! change the answer.
 
+pub mod cloud;
 pub mod commands;
 pub mod mobile;
 pub mod preview;
@@ -82,6 +83,7 @@ pub fn run() {
             mobile::mobile_onboarding_start,
             mobile::mobile_onboarding_stop,
             mobile::mobile_analyze,
+            cloud::cloud_validate_aws,
             commands::scope_list,
             commands::scope_add,
             commands::scope_remove,

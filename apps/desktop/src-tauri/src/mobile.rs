@@ -401,7 +401,7 @@ pub struct MobilePackage {
 /// Platform facts read from an app's manifest, with the security-relevant ones called out.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ManifestFacts {
-    /// "ios" (APK/AndroidManifest support is a later increment).
+    /// "ios" (Info.plist) or "android" (AndroidManifest.xml).
     pub platform: String,
     pub bundle_id: Option<String>,
     pub min_os: Option<String>,
@@ -493,6 +493,322 @@ fn ipa_manifest(data: &[u8], entries: &[ZipEntry], label: &str) -> Option<Manife
         ats_arbitrary_loads,
         ats_exception_domains,
         url_schemes,
+        permissions,
+        issues,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Android binary XML (AXML)
+// ---------------------------------------------------------------------------
+//
+// AndroidManifest.xml inside an APK is compiled to Android's binary XML. This is a
+// minimal reader: it decodes the string pool and walks the element chunks far enough to
+// pull the security-relevant facts (package, SDK levels, permissions, exported
+// components, debuggable / cleartext / network-security-config flags, deep-link
+// schemes). It is not a general AXML parser — unknown chunks are skipped, and any
+// inconsistency bails to `None` rather than panicking, because the input is an untrusted
+// dropped file.
+
+const RES_STRING_POOL: u16 = 0x0001;
+const RES_XML_TYPE: u16 = 0x0003;
+const RES_XML_START_ELEMENT: u16 = 0x0102;
+const NO_REF: u32 = 0xffff_ffff;
+const UTF8_FLAG: u32 = 0x0100;
+// Res_value data types we resolve (others fall back to the raw integer).
+const TYPE_STRING: u8 = 0x03;
+const TYPE_INT_HEX: u8 = 0x11;
+const TYPE_INT_BOOLEAN: u8 = 0x12;
+
+fn cle16(b: &[u8], o: usize) -> Option<u16> {
+    Some(u16::from_le_bytes([*b.get(o)?, *b.get(o + 1)?]))
+}
+fn cle32(b: &[u8], o: usize) -> Option<u32> {
+    Some(u32::from_le_bytes([
+        *b.get(o)?,
+        *b.get(o + 1)?,
+        *b.get(o + 2)?,
+        *b.get(o + 3)?,
+    ]))
+}
+
+/// Decodes an AXML length prefix. The high bit of the first unit marks a two-unit
+/// extension. `unit` is 1 for UTF-8 byte/char counts, 2 for UTF-16 char counts.
+fn axml_len(data: &[u8], p: &mut usize, unit: usize) -> Option<usize> {
+    if unit == 1 {
+        let b0 = *data.get(*p)? as usize;
+        *p += 1;
+        if b0 & 0x80 != 0 {
+            let b1 = *data.get(*p)? as usize;
+            *p += 1;
+            Some(((b0 & 0x7f) << 8) | b1)
+        } else {
+            Some(b0)
+        }
+    } else {
+        let w0 = cle16(data, *p)? as usize;
+        *p += 2;
+        if w0 & 0x8000 != 0 {
+            let w1 = cle16(data, *p)? as usize;
+            *p += 2;
+            Some(((w0 & 0x7fff) << 16) | w1)
+        } else {
+            Some(w0)
+        }
+    }
+}
+
+/// Decodes the string-pool chunk whose header starts at `base`.
+fn axml_string_pool(data: &[u8], base: usize) -> Option<Vec<String>> {
+    let header_size = cle16(data, base + 2)? as usize;
+    let count = cle32(data, base + 8)? as usize;
+    let flags = cle32(data, base + 16)?;
+    let strings_start = cle32(data, base + 20)? as usize;
+    let utf8 = flags & UTF8_FLAG != 0;
+    let offsets = base + header_size;
+    let data_base = base + strings_start;
+    // Guard an absurd count (malformed header) before allocating or looping on it.
+    if count > 1_000_000 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(count);
+    for i in 0..count {
+        let off = cle32(data, offsets + i * 4)? as usize;
+        let mut q = data_base.checked_add(off)?;
+        let s = if utf8 {
+            let _chars = axml_len(data, &mut q, 1)?;
+            let bytes = axml_len(data, &mut q, 1)?;
+            let end = q.checked_add(bytes)?;
+            String::from_utf8_lossy(data.get(q..end)?).into_owned()
+        } else {
+            let chars = axml_len(data, &mut q, 2)?;
+            let mut u16s = Vec::with_capacity(chars);
+            for _ in 0..chars {
+                u16s.push(cle16(data, q)?);
+                q += 2;
+            }
+            String::from_utf16_lossy(&u16s)
+        };
+        out.push(s);
+    }
+    Some(out)
+}
+
+struct AxmlAttr {
+    name: String,
+    value: String,
+}
+struct AxmlElement {
+    name: String,
+    attrs: Vec<AxmlAttr>,
+}
+
+fn axml_str(strings: &[String], r: u32) -> Option<String> {
+    if r == NO_REF {
+        None
+    } else {
+        strings.get(r as usize).cloned()
+    }
+}
+
+/// Parses a start-element chunk at `p` into its name and (resolved name, value) attributes.
+fn axml_start_element(data: &[u8], p: usize, strings: &[String]) -> Option<AxmlElement> {
+    // The XML node header is 16 bytes; the attribute extension begins right after it.
+    let ext = p + 16;
+    let name = axml_str(strings, cle32(data, ext + 4)?)?;
+    let attr_start = cle16(data, ext + 8)? as usize;
+    let attr_size = {
+        let s = cle16(data, ext + 10)? as usize;
+        if s == 0 {
+            20
+        } else {
+            s
+        }
+    };
+    let attr_count = cle16(data, ext + 12)? as usize;
+    let first = ext + attr_start;
+    let mut attrs = Vec::new();
+    for i in 0..attr_count {
+        let a = first + i * attr_size;
+        let aname = match axml_str(strings, cle32(data, a + 4)?) {
+            Some(n) => n,
+            None => continue,
+        };
+        let raw = cle32(data, a + 8)?;
+        let dtype = *data.get(a + 15)?;
+        let adata = cle32(data, a + 16)?;
+        let value = if raw != NO_REF {
+            axml_str(strings, raw).unwrap_or_default()
+        } else {
+            match dtype {
+                TYPE_STRING => axml_str(strings, adata).unwrap_or_default(),
+                TYPE_INT_BOOLEAN => if adata != 0 { "true" } else { "false" }.to_string(),
+                TYPE_INT_HEX => format!("0x{adata:x}"),
+                _ => adata.to_string(),
+            }
+        };
+        attrs.push(AxmlAttr { name: aname, value });
+    }
+    Some(AxmlElement { name, attrs })
+}
+
+/// Walks the AXML chunk stream, returning the start elements in document order (a flat
+/// list — the facts we want are identified by element name, not tree position).
+fn axml_parse(data: &[u8]) -> Option<Vec<AxmlElement>> {
+    if cle16(data, 0)? != RES_XML_TYPE {
+        return None;
+    }
+    let mut strings: Vec<String> = Vec::new();
+    let mut elements = Vec::new();
+    let mut p = cle16(data, 2)? as usize; // past the file header (headerSize = 8)
+    while p + 8 <= data.len() {
+        let ctype = cle16(data, p)?;
+        let csize = cle32(data, p + 4)? as usize;
+        if csize < 8 {
+            break;
+        }
+        match ctype {
+            RES_STRING_POOL => strings = axml_string_pool(data, p)?,
+            RES_XML_START_ELEMENT => {
+                if let Some(el) = axml_start_element(data, p, &strings) {
+                    elements.push(el);
+                }
+            }
+            _ => {}
+        }
+        p = p.checked_add(csize)?;
+    }
+    Some(elements)
+}
+
+/// `android.permission.INTERNET` → `INTERNET`; other names are kept whole.
+fn short_perm(name: &str) -> String {
+    name.strip_prefix("android.permission.")
+        .unwrap_or(name)
+        .to_string()
+}
+
+/// Decodes an APK's AndroidManifest.xml into structured facts, or None if it is absent or
+/// unreadable.
+fn android_manifest(data: &[u8], entries: &[ZipEntry]) -> Option<ManifestFacts> {
+    let entry = entries.iter().find(|e| e.name == "AndroidManifest.xml")?;
+    let bytes = zip_read_entry(data, entry, 4 * 1024 * 1024)?;
+    let elements = axml_parse(&bytes)?;
+
+    let attr = |el: &AxmlElement, n: &str| {
+        el.attrs
+            .iter()
+            .find(|a| a.name == n)
+            .map(|a| a.value.clone())
+    };
+
+    let mut bundle_id = None;
+    let mut min_sdk = None;
+    let mut target_sdk = None;
+    let mut permissions: Vec<String> = Vec::new();
+    let mut url_schemes: BTreeSet<String> = BTreeSet::new();
+    let mut debuggable = false;
+    let mut cleartext: Option<bool> = None;
+    let mut nsc = false;
+    let mut exported: Vec<String> = Vec::new();
+
+    for el in &elements {
+        match el.name.as_str() {
+            "manifest" => bundle_id = attr(el, "package"),
+            "uses-sdk" => {
+                min_sdk = attr(el, "minSdkVersion");
+                target_sdk = attr(el, "targetSdkVersion");
+            }
+            "uses-permission" | "uses-permission-sdk-23" => {
+                if let Some(n) = attr(el, "name") {
+                    permissions.push(short_perm(&n));
+                }
+            }
+            "application" => {
+                debuggable = attr(el, "debuggable").as_deref() == Some("true");
+                cleartext = attr(el, "usesCleartextTraffic").map(|v| v == "true");
+                nsc = attr(el, "networkSecurityConfig").is_some();
+            }
+            "activity" | "activity-alias" | "service" | "receiver" | "provider" => {
+                if attr(el, "exported").as_deref() == Some("true") {
+                    let n = attr(el, "name").unwrap_or_else(|| "(unnamed)".into());
+                    exported.push(format!("{} {n}", el.name));
+                }
+            }
+            "data" => {
+                if let Some(s) = attr(el, "scheme") {
+                    if !s.is_empty() && s != "http" && s != "https" {
+                        url_schemes.insert(s);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut issues = Vec::new();
+    if debuggable {
+        issues.push(
+            "android:debuggable=\"true\" — the app is debuggable, so anyone can attach a \
+             debugger and read its process memory. It must be false in release builds."
+                .to_string(),
+        );
+    }
+    match cleartext {
+        Some(true) => issues.push(
+            "android:usesCleartextTraffic=\"true\" — cleartext HTTP is permitted app-wide."
+                .to_string(),
+        ),
+        None => {
+            if let Some(t) = target_sdk.as_deref().and_then(|s| s.parse::<u32>().ok()) {
+                if t < 28 {
+                    issues.push(format!(
+                        "targetSdkVersion {t} (<28) — cleartext HTTP is permitted by default; set \
+                         usesCleartextTraffic=\"false\" or a network-security config."
+                    ));
+                }
+            }
+        }
+        Some(false) => {}
+    }
+    if nsc {
+        issues.push(
+            "A network-security config is declared — review it for cleartext permits, user-CA \
+             trust (debug-overrides) or disabled certificate pinning."
+                .to_string(),
+        );
+    }
+    if !exported.is_empty() {
+        issues.push(format!(
+            "{} exported component(s): {}. Each is reachable by other apps and must authorise \
+             its callers.",
+            exported.len(),
+            exported.join(", ")
+        ));
+    }
+    if !url_schemes.is_empty() {
+        issues.push(format!(
+            "Registers {} deep-link scheme(s): {}. Deep-link handlers should validate every \
+             incoming parameter.",
+            url_schemes.len(),
+            url_schemes.iter().cloned().collect::<Vec<_>>().join(", ")
+        ));
+    }
+
+    let min_os = match (&min_sdk, &target_sdk) {
+        (Some(m), Some(t)) => Some(format!("minSdk {m}, target {t}")),
+        (Some(m), None) => Some(format!("minSdk {m}")),
+        (None, Some(t)) => Some(format!("target {t}")),
+        (None, None) => None,
+    };
+
+    Some(ManifestFacts {
+        platform: "android".to_string(),
+        bundle_id,
+        min_os,
+        ats_arbitrary_loads: None,
+        ats_exception_domains: Vec::new(),
+        url_schemes: url_schemes.into_iter().collect(),
         permissions,
         issues,
     })
@@ -678,10 +994,10 @@ pub fn mobile_analyze(path: String) -> CommandResult<MobilePackage> {
     let strings = set.into_iter().collect::<Vec<_>>().join("\n");
     let note = truncated.then(|| "String extraction was capped; the view is partial.".to_string());
 
-    let manifest = if kind == "ipa" {
-        ipa_manifest(&data, &entries, &label)
-    } else {
-        None
+    let manifest = match kind {
+        "ipa" => ipa_manifest(&data, &entries, &label),
+        "apk" => android_manifest(&data, &entries),
+        _ => None,
     };
 
     Ok(MobilePackage {
@@ -814,6 +1130,145 @@ mod tests {
         assert!(
             !facts.issues.is_empty(),
             "ATS-off and URL schemes should raise findings"
+        );
+    }
+
+    // --- AXML (AndroidManifest.xml) test builders -------------------------------------
+    // Build a minimal UTF-8 AXML blob the parser can read, so the round-trip is covered
+    // without checking in a real APK.
+
+    /// A UTF-8 pool entry: char-count, byte-count, bytes, NUL (ASCII ⇒ both counts equal).
+    fn axml_u8_string(s: &str) -> Vec<u8> {
+        let b = s.as_bytes();
+        let mut v = vec![b.len() as u8, b.len() as u8];
+        v.extend_from_slice(b);
+        v.push(0);
+        v
+    }
+
+    fn build_string_pool(strings: &[&str]) -> Vec<u8> {
+        let mut region = Vec::new();
+        let mut offsets = Vec::new();
+        for s in strings {
+            offsets.push(region.len() as u32);
+            region.extend_from_slice(&axml_u8_string(s));
+        }
+        let header_size: u16 = 28;
+        let count = strings.len() as u32;
+        let strings_start = header_size as u32 + count * 4;
+        let raw = header_size as u32 + count * 4 + region.len() as u32;
+        let pad = (4 - (raw % 4)) % 4;
+        let size = raw + pad;
+        let mut c = Vec::new();
+        c.extend_from_slice(&RES_STRING_POOL.to_le_bytes());
+        c.extend_from_slice(&header_size.to_le_bytes());
+        c.extend_from_slice(&size.to_le_bytes());
+        c.extend_from_slice(&count.to_le_bytes());
+        c.extend_from_slice(&0u32.to_le_bytes()); // styleCount
+        c.extend_from_slice(&UTF8_FLAG.to_le_bytes());
+        c.extend_from_slice(&strings_start.to_le_bytes());
+        c.extend_from_slice(&0u32.to_le_bytes()); // stylesStart
+        for o in &offsets {
+            c.extend_from_slice(&o.to_le_bytes());
+        }
+        c.extend_from_slice(&region);
+        c.resize(c.len() + pad as usize, 0);
+        c
+    }
+
+    /// `attrs`: (name index, rawValue ref, dataType, data).
+    fn build_start_element(name_idx: u32, attrs: &[(u32, u32, u8, u32)]) -> Vec<u8> {
+        let n = attrs.len();
+        let size = (36 + n * 20) as u32;
+        let mut c = Vec::new();
+        c.extend_from_slice(&RES_XML_START_ELEMENT.to_le_bytes());
+        c.extend_from_slice(&16u16.to_le_bytes()); // headerSize
+        c.extend_from_slice(&size.to_le_bytes());
+        c.extend_from_slice(&0u32.to_le_bytes()); // lineNumber
+        c.extend_from_slice(&NO_REF.to_le_bytes()); // comment
+        c.extend_from_slice(&NO_REF.to_le_bytes()); // ns
+        c.extend_from_slice(&name_idx.to_le_bytes()); // name
+        c.extend_from_slice(&20u16.to_le_bytes()); // attributeStart
+        c.extend_from_slice(&20u16.to_le_bytes()); // attributeSize
+        c.extend_from_slice(&(n as u16).to_le_bytes()); // attributeCount
+        c.extend_from_slice(&0u16.to_le_bytes()); // idIndex
+        c.extend_from_slice(&0u16.to_le_bytes()); // classIndex
+        c.extend_from_slice(&0u16.to_le_bytes()); // styleIndex
+        for &(aname, raw, dtype, adata) in attrs {
+            c.extend_from_slice(&NO_REF.to_le_bytes()); // ns
+            c.extend_from_slice(&aname.to_le_bytes()); // name
+            c.extend_from_slice(&raw.to_le_bytes()); // rawValue
+            c.extend_from_slice(&8u16.to_le_bytes()); // Res_value size
+            c.push(0); // res0
+            c.push(dtype); // dataType
+            c.extend_from_slice(&adata.to_le_bytes()); // data
+        }
+        c
+    }
+
+    fn build_axml(pool: &[u8], elements: &[Vec<u8>]) -> Vec<u8> {
+        let mut body = pool.to_vec();
+        for e in elements {
+            body.extend_from_slice(e);
+        }
+        let total = (8 + body.len()) as u32;
+        let mut out = Vec::new();
+        out.extend_from_slice(&RES_XML_TYPE.to_le_bytes());
+        out.extend_from_slice(&8u16.to_le_bytes()); // headerSize
+        out.extend_from_slice(&total.to_le_bytes());
+        out.extend_from_slice(&body);
+        out
+    }
+
+    #[test]
+    fn decodes_an_android_manifest() {
+        const TRUE: u32 = 0xffff_ffff; // boolean true is stored as -1
+        let strings = [
+            "package",                     // 0
+            "com.example.test",            // 1
+            "manifest",                    // 2
+            "name",                        // 3
+            "android.permission.INTERNET", // 4
+            "uses-permission",             // 5
+            "debuggable",                  // 6
+            "application",                 // 7
+            "exported",                    // 8
+            "activity",                    // 9
+            "com.example.test.Main",       // 10
+            "scheme",                      // 11
+            "myapp",                       // 12
+            "data",                        // 13
+        ];
+        let pool = build_string_pool(&strings);
+        let elements = vec![
+            build_start_element(2, &[(0, 1, TYPE_STRING, 1)]),
+            build_start_element(5, &[(3, 4, TYPE_STRING, 4)]),
+            build_start_element(7, &[(6, NO_REF, TYPE_INT_BOOLEAN, TRUE)]),
+            build_start_element(
+                9,
+                &[
+                    (3, 10, TYPE_STRING, 10),
+                    (8, NO_REF, TYPE_INT_BOOLEAN, TRUE),
+                ],
+            ),
+            build_start_element(13, &[(11, 12, TYPE_STRING, 12)]),
+        ];
+        let axml = build_axml(&pool, &elements);
+        let zip = build_zip("AndroidManifest.xml", &axml);
+        let entries = zip_entries(&zip);
+        let facts = android_manifest(&zip, &entries).expect("decodes");
+
+        assert_eq!(facts.platform, "android");
+        assert_eq!(facts.bundle_id.as_deref(), Some("com.example.test"));
+        assert!(facts.permissions.iter().any(|p| p == "INTERNET"));
+        assert!(facts.url_schemes.iter().any(|s| s == "myapp"));
+        assert!(
+            facts.issues.iter().any(|i| i.contains("debuggable")),
+            "debuggable should raise a finding"
+        );
+        assert!(
+            facts.issues.iter().any(|i| i.contains("exported")),
+            "the exported activity should raise a finding"
         );
     }
 }

@@ -225,7 +225,13 @@ export function MobileView() {
         {pkgError && <p className="notice warn">{pkgError}</p>}
         {pkg?.manifest && (
           <div className="card" style={{ marginBottom: 12 }}>
-            <h3>Platform (Info.plist)</h3>
+            <h3>
+              Platform (
+              {pkg.manifest.platform === "android"
+                ? "AndroidManifest.xml"
+                : "Info.plist"}
+              )
+            </h3>
             <dl className="facts">
               {pkg.manifest.bundle_id && (
                 <>
@@ -239,14 +245,22 @@ export function MobileView() {
                   <dd className="mono small">{pkg.manifest.min_os}</dd>
                 </>
               )}
-              <dt>ATS arbitrary loads</dt>
-              <dd className={pkg.manifest.ats_arbitrary_loads ? "insecure" : "ok"}>
-                {pkg.manifest.ats_arbitrary_loads === null
-                  ? "default (not set)"
-                  : pkg.manifest.ats_arbitrary_loads
-                    ? "ENABLED — ATS off"
-                    : "disabled — ATS on"}
-              </dd>
+              {pkg.manifest.platform !== "android" && (
+                <>
+                  <dt>ATS arbitrary loads</dt>
+                  <dd
+                    className={
+                      pkg.manifest.ats_arbitrary_loads ? "insecure" : "ok"
+                    }
+                  >
+                    {pkg.manifest.ats_arbitrary_loads === null
+                      ? "default (not set)"
+                      : pkg.manifest.ats_arbitrary_loads
+                        ? "ENABLED — ATS off"
+                        : "disabled — ATS on"}
+                  </dd>
+                </>
+              )}
               {pkg.manifest.url_schemes.length > 0 && (
                 <>
                   <dt>URL schemes</dt>

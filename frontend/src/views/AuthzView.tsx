@@ -100,11 +100,14 @@ export function AuthzView({
 
   if (requestId === null) {
     return (
-      <p className="placeholder">
-        Choose a request in History and press “Test authorization”. The matrix
-        replays one captured request as every identity in the project, so it needs
-        a request to start from.
-      </p>
+      <div className="authz">
+        <h2>Authorization</h2>
+        <p className="placeholder">
+          Choose a request in History and press “Test authorization”. The matrix
+          replays one captured request as every identity in the project, so it needs
+          a request to start from.
+        </p>
+      </div>
     );
   }
 

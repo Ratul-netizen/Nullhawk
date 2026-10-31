@@ -10,7 +10,19 @@ import {
 } from "../lib/jwt";
 import { mine, type MineResult } from "../lib/miner";
 import { generateBypasses, type BypassCandidate } from "../lib/bypass";
-import { bypassRun, describeError, type BypassResult } from "../ipc";
+import {
+  bypassRun,
+  cloudValidateAws,
+  cloudAwsBlastRadius,
+  cloudValidateGcp,
+  cloudValidateAzure,
+  describeError,
+  type BypassResult,
+  type AwsIdentity,
+  type AwsBlastRadius,
+  type GcpIdentity,
+  type AzureIdentity,
+} from "../ipc";
 import { TRANSFORMS, runPipeline, transformById } from "../lib/transforms";
 import { convert, detectFormat, type BodyFormat } from "../lib/convert";
 import {
@@ -37,7 +49,8 @@ type Tool =
   | "convert"
   | "payloads"
   | "cvss"
-  | "bypass";
+  | "bypass"
+  | "cloud";
 
 export function ToolkitView({ hasProject }: { hasProject: boolean }) {
   const [tool, setTool] = useState<Tool>("jwt");
@@ -86,6 +99,12 @@ export function ToolkitView({ hasProject }: { hasProject: boolean }) {
         >
           403 / WAF bypass
         </button>
+        <button
+          className={tool === "cloud" ? "seg-btn on" : "seg-btn"}
+          onClick={() => setTool("cloud")}
+        >
+          Cloud key check
+        </button>
       </div>
       {tool === "jwt" && <JwtPanel />}
       {tool === "miner" && <MinerPanel />}
@@ -94,7 +113,372 @@ export function ToolkitView({ hasProject }: { hasProject: boolean }) {
       {tool === "payloads" && <PayloadsPanel />}
       {tool === "cvss" && <CvssPanel />}
       {tool === "bypass" && <BypassPanel hasProject={hasProject} />}
+      {tool === "cloud" && <CloudPanel />}
     </div>
+  );
+}
+
+function CloudPanel() {
+  const [accessKey, setAccessKey] = useState("");
+  const [secret, setSecret] = useState("");
+  const [sessionToken, setSessionToken] = useState("");
+  const [result, setResult] = useState<AwsIdentity | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [blast, setBlast] = useState<AwsBlastRadius | null>(null);
+  const [blastError, setBlastError] = useState<string | null>(null);
+  const [blastBusy, setBlastBusy] = useState(false);
+
+  const validate = async () => {
+    setBusy(true);
+    setError(null);
+    setResult(null);
+    setBlast(null);
+    setBlastError(null);
+    try {
+      setResult(await cloudValidateAws(accessKey, secret, sessionToken.trim() || null));
+    } catch (e) {
+      setError(describeError(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const mapBlast = async () => {
+    setBlastBusy(true);
+    setBlastError(null);
+    setBlast(null);
+    try {
+      setBlast(await cloudAwsBlastRadius(accessKey, secret, sessionToken.trim() || null));
+    } catch (e) {
+      setBlastError(describeError(e));
+    } finally {
+      setBlastBusy(false);
+    }
+  };
+
+  return (
+    <div className="cloud-key">
+      <section className="card">
+        <h2>Cloud key check — AWS</h2>
+        <p className="muted">
+          Confirm a leaked AWS access key is live and learn whose it is, via STS{" "}
+          <code>GetCallerIdentity</code> — one read-only call that touches no resource. Only
+          validate keys you are authorised to test. The request goes to{" "}
+          <code>sts.amazonaws.com</code> and nowhere else.
+        </p>
+        <div className="form-grid">
+          <label>
+            Access key id
+            <input
+              className="mono"
+              value={accessKey}
+              spellCheck={false}
+              placeholder="AKIA…"
+              onChange={(e) => setAccessKey(e.target.value)}
+            />
+          </label>
+          <label>
+            Secret access key
+            <input
+              className="mono"
+              type="password"
+              value={secret}
+              spellCheck={false}
+              placeholder="…"
+              onChange={(e) => setSecret(e.target.value)}
+            />
+          </label>
+          <label>
+            Session token <span className="muted small">(optional)</span>
+            <input
+              className="mono"
+              value={sessionToken}
+              spellCheck={false}
+              placeholder="for temporary credentials"
+              onChange={(e) => setSessionToken(e.target.value)}
+            />
+          </label>
+        </div>
+        <div className="row-actions" style={{ marginTop: 12 }}>
+          <button onClick={validate} disabled={busy || !accessKey || !secret}>
+            {busy ? "Checking…" : "Validate"}
+          </button>
+        </div>
+        {error && <p className="notice warn">{error}</p>}
+      </section>
+
+      {result && (
+        <section className={result.valid ? "card" : "card"}>
+          <h3>
+            {result.valid ? (
+              <span className="tag insecure">LIVE</span>
+            ) : (
+              <span className="tag">not valid</span>
+            )}{" "}
+            {result.note}
+          </h3>
+          {result.valid ? (
+            <>
+              <dl className="facts">
+                <dt>ARN</dt>
+                <dd className="mono small">{result.arn ?? "—"}</dd>
+                <dt>Account</dt>
+                <dd className="mono small">{result.account ?? "—"}</dd>
+                <dt>User id</dt>
+                <dd className="mono small">{result.user_id ?? "—"}</dd>
+              </dl>
+              <div className="row-actions" style={{ marginTop: 12 }}>
+                <button onClick={mapBlast} disabled={blastBusy}>
+                  {blastBusy ? "Mapping…" : "Map blast radius"}
+                </button>
+                <span className="muted small">
+                  Read-only IAM self-introspection — what this key is granted.
+                </span>
+              </div>
+              {blastError && <p className="notice warn">{blastError}</p>}
+              {blast && (
+                <div style={{ marginTop: 12 }}>
+                  {blast.admin && (
+                    <p className="notice warn">
+                      AdministratorAccess — this key has full control of the account.
+                    </p>
+                  )}
+                  <dl className="facts">
+                    <dt>IAM user</dt>
+                    <dd className="mono small">{blast.user_name ?? "—"}</dd>
+                    {blast.attached_policies.length > 0 && (
+                      <>
+                        <dt>Attached policies</dt>
+                        <dd className="mono small">{blast.attached_policies.join(", ")}</dd>
+                      </>
+                    )}
+                    {blast.inline_policies.length > 0 && (
+                      <>
+                        <dt>Inline policies</dt>
+                        <dd className="mono small">{blast.inline_policies.join(", ")}</dd>
+                      </>
+                    )}
+                    {blast.groups.length > 0 && (
+                      <>
+                        <dt>Groups</dt>
+                        <dd className="mono small">{blast.groups.join(", ")}</dd>
+                      </>
+                    )}
+                  </dl>
+                  {blast.notes.length > 0 && (
+                    <ul className="mine-list">
+                      {blast.notes.map((n, i) => (
+                        <li key={i}>
+                          <span className="small">{n}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+            </>
+          ) : (
+            <dl className="facts">
+              <dt>Code</dt>
+              <dd className="mono small">{result.error_code ?? "—"}</dd>
+              <dt>Message</dt>
+              <dd className="small">{result.error_message ?? "—"}</dd>
+            </dl>
+          )}
+        </section>
+      )}
+
+      <GcpKeyPanel />
+      <AzureKeyPanel />
+    </div>
+  );
+}
+
+function AzureKeyPanel() {
+  const [tenant, setTenant] = useState("");
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
+  const [result, setResult] = useState<AzureIdentity | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const validate = async () => {
+    setBusy(true);
+    setError(null);
+    setResult(null);
+    try {
+      setResult(await cloudValidateAzure(tenant, clientId, clientSecret));
+    } catch (e) {
+      setError(describeError(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <section className="card">
+        <h2>Cloud key check — Azure</h2>
+        <p className="muted">
+          Confirm a leaked Azure <em>service-principal secret</em> is live and learn which
+          app it is, via the client-credentials grant. The request goes to{" "}
+          <code>login.microsoftonline.com</code> and nowhere else; the minted token is never
+          used. Only validate credentials you are authorised to test.
+        </p>
+        <div className="form-grid">
+          <label>
+            Tenant (directory) id
+            <input
+              className="mono"
+              value={tenant}
+              spellCheck={false}
+              placeholder="00000000-0000-0000-0000-000000000000"
+              onChange={(e) => setTenant(e.target.value)}
+            />
+          </label>
+          <label>
+            Application (client) id
+            <input
+              className="mono"
+              value={clientId}
+              spellCheck={false}
+              placeholder="00000000-0000-0000-0000-000000000000"
+              onChange={(e) => setClientId(e.target.value)}
+            />
+          </label>
+          <label>
+            Client secret
+            <input
+              className="mono"
+              type="password"
+              value={clientSecret}
+              spellCheck={false}
+              placeholder="the secret value"
+              onChange={(e) => setClientSecret(e.target.value)}
+            />
+          </label>
+        </div>
+        <div className="row-actions" style={{ marginTop: 12 }}>
+          <button
+            onClick={validate}
+            disabled={busy || !tenant || !clientId || !clientSecret}
+          >
+            {busy ? "Checking…" : "Validate"}
+          </button>
+        </div>
+        {error && <p className="notice warn">{error}</p>}
+      </section>
+
+      {result && (
+        <section className="card">
+          <h3>
+            {result.valid ? (
+              <span className="tag insecure">LIVE</span>
+            ) : (
+              <span className="tag">not valid</span>
+            )}{" "}
+            {result.note}
+          </h3>
+          {result.valid ? (
+            <dl className="facts">
+              <dt>Application id</dt>
+              <dd className="mono small">{result.app_id ?? "—"}</dd>
+              <dt>Tenant</dt>
+              <dd className="mono small">{result.tenant ?? "—"}</dd>
+              <dt>Object id</dt>
+              <dd className="mono small">{result.object_id ?? "—"}</dd>
+            </dl>
+          ) : (
+            <dl className="facts">
+              <dt>Error</dt>
+              <dd className="mono small">{result.error ?? "—"}</dd>
+              <dt>Description</dt>
+              <dd className="small">{result.error_description ?? "—"}</dd>
+            </dl>
+          )}
+        </section>
+      )}
+    </>
+  );
+}
+
+function GcpKeyPanel() {
+  const [keyJson, setKeyJson] = useState("");
+  const [result, setResult] = useState<GcpIdentity | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const validate = async () => {
+    setBusy(true);
+    setError(null);
+    setResult(null);
+    try {
+      setResult(await cloudValidateGcp(keyJson));
+    } catch (e) {
+      setError(describeError(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <section className="card">
+        <h2>Cloud key check — GCP</h2>
+        <p className="muted">
+          Confirm a leaked GCP <em>service-account key</em> is live and learn which account
+          it is. Nullhawk signs a read-only token request with the key and exchanges it at
+          the key's own <code>token_uri</code> (<code>oauth2.googleapis.com</code>) — the
+          token is never used. Only validate keys you are authorised to test.
+        </p>
+        <label>
+          Service-account key JSON
+          <textarea
+            className="mono"
+            rows={6}
+            value={keyJson}
+            spellCheck={false}
+            placeholder={'{ "type": "service_account", "project_id": "…", "private_key": "-----BEGIN PRIVATE KEY-----…", "client_email": "…" }'}
+            onChange={(e) => setKeyJson(e.target.value)}
+          />
+        </label>
+        <div className="row-actions" style={{ marginTop: 12 }}>
+          <button onClick={validate} disabled={busy || keyJson.trim() === ""}>
+            {busy ? "Checking…" : "Validate"}
+          </button>
+        </div>
+        {error && <p className="notice warn">{error}</p>}
+      </section>
+
+      {result && (
+        <section className="card">
+          <h3>
+            {result.valid ? (
+              <span className="tag insecure">LIVE</span>
+            ) : (
+              <span className="tag">not valid</span>
+            )}{" "}
+            {result.note}
+          </h3>
+          {result.valid ? (
+            <dl className="facts">
+              <dt>Service account</dt>
+              <dd className="mono small">{result.client_email ?? "—"}</dd>
+              <dt>Project</dt>
+              <dd className="mono small">{result.project_id ?? "—"}</dd>
+            </dl>
+          ) : (
+            <dl className="facts">
+              <dt>Error</dt>
+              <dd className="mono small">{result.error ?? "—"}</dd>
+              <dt>Description</dt>
+              <dd className="small">{result.error_description ?? "—"}</dd>
+            </dl>
+          )}
+        </section>
+      )}
+    </>
   );
 }
 

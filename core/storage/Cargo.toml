@@ -17,11 +17,19 @@ r2d2_sqlite.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 sha2.workspace = true
+ring.workspace = true
+base64.workspace = true
 uuid.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
 bytes.workspace = true
+
+# The OS keystore backend is only used where it exists (Windows Credential Manager /
+# macOS Keychain). On other targets credential encryption takes its key from the
+# NULLHAWK_CREDENTIAL_KEY env var, so keyring is not compiled there at all.
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
+keyring.workspace = true
 
 [dev-dependencies]
 nullhawk-types = { workspace = true, features = ["test-support"] }

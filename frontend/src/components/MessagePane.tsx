@@ -1,7 +1,9 @@
 import { useMemo, useState } from "react";
 
-import type { BodyPreview } from "../ipc";
+import { jwtCrack, pickFile, type BodyPreview, type CrackResult } from "../ipc";
 import { detectLang, prettify, type BodyLang } from "./beautify";
+import { highlightCode } from "./highlight";
+import { scanInteresting, decodeJwt } from "./interesting";
 
 /**
  * Renders one HTTP message: the head as written, then the body.
@@ -25,15 +27,125 @@ export function MessagePane({
   body: BodyPreview;
 }) {
   const contentType = useMemo(() => extractContentType(head), [head]);
+  const scanText = useMemo(
+    () => head + "\n" + (body.rendering === "text" ? body.content : ""),
+    [head, body],
+  );
   return (
     <section className="message">
       <header className="message-header">
         <h3>{title}</h3>
         <span className="muted">{describeBody(body)}</span>
       </header>
+      <InterestingValues text={scanText} />
       <pre className="head">{head}</pre>
       <BodyView body={body} contentType={contentType} />
     </section>
+  );
+}
+
+/**
+ * The sensitive values found in this message, surfaced as a short list so they are not
+ * buried in the text. Each is a lead to check — copy it, or decode a JWT in place.
+ */
+function InterestingValues({ text }: { text: string }) {
+  const findings = useMemo(() => scanInteresting(text), [text]);
+  const [open, setOpen] = useState<number | null>(null);
+  const [copied, setCopied] = useState<number | null>(null);
+  const [crack, setCrack] = useState<
+    Record<number, { busy: boolean; result?: CrackResult; err?: string }>
+  >({});
+  if (findings.length === 0) return null;
+
+  const copy = (i: number, v: string) => {
+    navigator.clipboard?.writeText(v).then(
+      () => {
+        setCopied(i);
+        window.setTimeout(() => setCopied(null), 1000);
+      },
+      () => undefined,
+    );
+  };
+
+  const runCrack = async (i: number, value: string, wordlist: string | null) => {
+    setCrack((c) => ({ ...c, [i]: { busy: true } }));
+    try {
+      const result = await jwtCrack(value, wordlist);
+      setCrack((c) => ({ ...c, [i]: { busy: false, result } }));
+    } catch (e) {
+      setCrack((c) => ({ ...c, [i]: { busy: false, err: String(e) } }));
+    }
+  };
+
+  const crackWithWordlist = async (i: number, value: string) => {
+    const path = await pickFile();
+    if (path) await runCrack(i, value, path);
+  };
+
+  return (
+    <div className="iv-panel">
+      <div className="iv-head">
+        ⚑ Interesting values <span className="muted">· {findings.length}</span>
+      </div>
+      <ul className="iv-list">
+        {findings.map((f, i) => {
+          const decoded = f.type === "jwt" ? decodeJwt(f.value) : null;
+          const cr = crack[i];
+          return (
+            <li className="iv-item" key={i}>
+              <span className={`iv-badge iv-${f.type}`}>{f.label}</span>
+              <span className="iv-value mono">
+                {f.value.length > 88 ? f.value.slice(0, 87) + "…" : f.value}
+              </span>
+              <span className="iv-actions">
+                <button className="chip-btn" onClick={() => copy(i, f.value)}>
+                  {copied === i ? "Copied" : "Copy"}
+                </button>
+                {decoded && (
+                  <button className="chip-btn" onClick={() => setOpen(open === i ? null : i)}>
+                    {open === i ? "Hide" : "Decode"}
+                  </button>
+                )}
+                {f.type === "jwt" && (
+                  <>
+                    <button
+                      className="chip-btn"
+                      disabled={cr?.busy}
+                      title="Try the common-secrets list (CPU, instant)"
+                      onClick={() => void runCrack(i, f.value, null)}
+                    >
+                      {cr?.busy ? "Cracking…" : "Crack"}
+                    </button>
+                    <button
+                      className="chip-btn"
+                      disabled={cr?.busy}
+                      title="Pick a wordlist — runs on the GPU via hashcat when installed"
+                      onClick={() => void crackWithWordlist(i, f.value)}
+                    >
+                      Wordlist…
+                    </button>
+                  </>
+                )}
+              </span>
+              {decoded && open === i && <pre className="iv-decoded">{decoded}</pre>}
+              {cr?.result && (
+                <div className={`iv-crack${cr.result.found ? " iv-crack-hit" : ""}`}>
+                  {cr.result.found ? (
+                    <>
+                      <strong>secret:</strong> <span className="mono">{cr.result.secret}</span>{" "}
+                      <span className="muted">· via {cr.result.tool}</span>
+                    </>
+                  ) : (
+                    <span className="muted">{cr.result.note}</span>
+                  )}
+                </div>
+              )}
+              {cr?.err && <div className="iv-crack muted">{cr.err}</div>}
+            </li>
+          );
+        })}
+      </ul>
+    </div>
   );
 }
 
@@ -120,25 +232,31 @@ function BodyView({
       {isHex ? (
         <pre className="body hex">{shown}</pre>
       ) : (
-        <CodeBlock text={shown} wrap={wrap} />
+        <CodeBlock text={shown} lang={lang} wrap={wrap} />
       )}
     </div>
   );
 }
 
 /** A body with a line-number gutter, the way a request pane is read line by line. */
-function CodeBlock({ text, wrap }: { text: string; wrap: boolean }) {
+function CodeBlock({ text, lang, wrap }: { text: string; lang: BodyLang; wrap: boolean }) {
   const lineCount = useMemo(() => text.split("\n").length, [text]);
   const gutter = useMemo(
     () => Array.from({ length: lineCount }, (_, i) => i + 1).join("\n"),
     [lineCount],
   );
+  const html = useMemo(() => highlightCode(text, lang), [text, lang]);
   return (
     <div className={wrap ? "code-block wrap" : "code-block"}>
       <pre className="code-gutter" aria-hidden="true">
         {gutter}
       </pre>
-      <pre className="code-body">{text}</pre>
+      {html ? (
+        // Safe: highlight.js escapes the source, so no markup from the body can execute.
+        <pre className="code-body hljs" dangerouslySetInnerHTML={{ __html: html }} />
+      ) : (
+        <pre className="code-body">{text}</pre>
+      )}
     </div>
   );
 }

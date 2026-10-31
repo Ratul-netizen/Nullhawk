@@ -44,9 +44,18 @@ nullhawk-sequencer.workspace = true
 nullhawk-browser.workspace = true
 futures.workspace = true
 bytes.workspace = true
+qrcode.workspace = true
+flate2.workspace = true
+plist.workspace = true
+ring.workspace = true
+base64.workspace = true
 chrono.workspace = true
 tokio.workspace = true
 tauri.workspace = true
+# Native folder picker for choosing a project directory. default-features off keeps it
+# off GTK on Linux (the xdg-portal backend is used there instead), so the desktop shell
+# still checks on CI; Windows and macOS use their native backend regardless.
+rfd = { version = "0.14", default-features = false, features = ["xdg-portal", "tokio"] }
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
@@ -54,4 +63,4 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util"] }

@@ -26,6 +26,7 @@ members = [
     "core/report",
     "core/recon",
     "apps/cli",
+    "apps/mcp",
     "apps/desktop/src-tauri",
 ]
 # The fuzz targets are a package of their own: they need nightly and libfuzzer-sys, and a
@@ -129,6 +130,18 @@ http = "1"
 # signature and key in the licence file.
 ring = "0.17"
 base64 = "0.21"
+
+# QR codes for mobile onboarding (apps/desktop): core matrix only, no image/renderer deps.
+qrcode = { version = "0.14", default-features = false }
+
+# Property-list decoding for IPA Info.plist (apps/desktop static analysis): handles both the
+# binary (bplist) and XML forms iOS ships.
+plist = "1"
+
+# Credential encryption at rest (core/storage/src/crypt.rs): the data-encryption key
+# lives in the OS secret store (Windows Credential Manager / macOS Keychain). Native
+# backends only — a headless Linux/CI host uses the NULLHAWK_CREDENTIAL_KEY env instead.
+keyring = { version = "3", default-features = false, features = ["windows-native", "apple-native"] }
 
 # Hashing (content-addressed blob store)
 sha2 = "0.10"

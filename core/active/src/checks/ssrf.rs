@@ -57,9 +57,10 @@ const SETTLES: &str = "input.ssrf";
 const INFO: DetectorInfo = DetectorInfo {
     id: DetectorId("input.ssrf"),
     name: "Server-side request forgery",
-    version: "1.1.0",
+    version: "1.2.0",
     about: "whether an input makes the server fetch a caller-chosen URL — proven by the \
-            contents of the cloud metadata endpoint coming back from an internal address",
+            contents of the AWS or GCP instance-metadata endpoint coming back from an \
+            internal address",
     mode: DetectorMode::Active,
     observes: false,
     hypothesizes: false,
@@ -69,6 +70,25 @@ const INFO: DetectorInfo = DetectorInfo {
 
 const METADATA_URL: &str = "http://169.254.169.254/latest/meta-data/";
 const CONTROL_URL: &str = "http://example.com/";
+
+/// GCP's metadata, via the **`v1beta1`** path, which — unlike `v1` — does not require the
+/// `Metadata-Flavor: Google` request header. That matters here: a server coerced into
+/// fetching a caller-chosen URL sends its own default headers, not Google's, so only the
+/// header-less path is reachable by a plain URL SSRF. `?recursive=true` returns the whole
+/// tree as JSON in one request. (Azure's IMDS mandates a `Metadata: true` header on every
+/// path, so it is not reachable this way and is deliberately not probed.)
+const GCP_METADATA_URL: &str =
+    "http://metadata.google.internal/computeMetadata/v1beta1/?recursive=true";
+
+/// Keys the GCP recursive metadata JSON carries that an ordinary response does not. GCP
+/// metadata also lives at `169.254.169.254`, but the `metadata.google.internal` host is
+/// internal-only, so these tokens coming back from a request aimed there is the proof.
+const GCP_SIGNATURES: &[&str] = &[
+    "numericProjectId",
+    "serviceAccounts",
+    "oauth2AccessToken",
+    "defaultServiceAccount",
+];
 
 /// Tokens the EC2 metadata index lists that an ordinary page does not. Hyphenated and
 /// specific on purpose, so a match is the metadata service and not prose.
@@ -188,6 +208,12 @@ impl ActiveCheck for ServerSideRequestForgery {
             Attempt::Failed(why) => return Ok(Verification::Inconclusive { why }),
         };
         let Some(hit) = first_signature(&metadata.body) else {
+            // AWS reflected nothing. GCP's v1beta1 path is header-less, so a plain URL SSRF
+            // can reach it where it cannot reach AWS IMDSv2 or Azure — try it before
+            // concluding.
+            if let Some(verdict) = try_gcp(subject, lab, &slot, &baseline, budget).await {
+                return Ok(verdict);
+            }
             // The metadata trick reflects nothing here. A *blind* fetch — one that makes
             // the request but reveals nothing in its response — is invisible to every
             // in-band check, and is exactly what a collaborator exists to catch. Only
@@ -288,7 +314,8 @@ impl ActiveCheck for ServerSideRequestForgery {
                           resolve the URL and allowlist the destination host, reject \
                           link-local and private ranges (including via DNS rebinding), and \
                           disable redirects. On AWS, require IMDSv2 so a bare GET cannot \
-                          read metadata."
+                          read metadata; on GCP, the allowlist is the control, since the \
+                          metadata service answers any request from the instance."
                 .into(),
             reproduction: format!(
                 "Send {} {} with {where_} set to the internal URL the evidence records and \
@@ -347,6 +374,54 @@ fn first_signature(body: &[u8]) -> Option<String> {
         .iter()
         .find(|needle| text.contains(**needle))
         .map(|needle| needle.to_string())
+}
+
+fn first_gcp_signature(body: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(body);
+    GCP_SIGNATURES
+        .iter()
+        .find(|needle| text.contains(**needle))
+        .map(|needle| needle.to_string())
+}
+
+/// Tries GCP's header-less metadata after the AWS probe reflected nothing. Returns a
+/// verdict only on a hit; `None` leaves the caller's existing flow (blind, then refuted)
+/// untouched. `baseline` is the untouched response, used to keep a hit attributable.
+async fn try_gcp(
+    subject: &Subject,
+    lab: &dyn Lab,
+    slot: &ObjectLocation,
+    baseline: &Answer,
+    budget: &Budget,
+) -> Option<Verification> {
+    // The AWS attempt already spent the baseline and one probe; only reach for GCP when
+    // the budget still has a request, and only when the baseline is clean of GCP tokens.
+    if budget.per_hypothesis < 3 || first_gcp_signature(&baseline.body).is_some() {
+        return None;
+    }
+    let gcp = match probe(subject, lab, slot, GCP_METADATA_URL).await {
+        Attempt::Answered(answer) => answer,
+        Attempt::Failed(_) => return None,
+    };
+    let hit = first_gcp_signature(&gcp.body)?;
+    Some(Verification::Supported {
+        support: Support::Distinctive,
+        note: format!(
+            "{} returned GCP instance-metadata contents (`{}`) when pointed at \
+             metadata.google.internal — an internal-only host — over the header-less \
+             v1beta1 path; the server requests a URL the input controls",
+            describe(slot),
+            hit,
+        ),
+        evidence: vec![
+            from_exchange(subject),
+            Evidence::Exchange {
+                request: gcp.request,
+                response: None,
+                note: format!("answered {} carrying `{hit}` from GCP metadata", gcp.status),
+            },
+        ],
+    })
 }
 
 struct Answer {
@@ -561,6 +636,21 @@ mod tests {
         let index = b"ami-id\nami-launch-index\nblock-device-mapping/\ninstance-id\niam/\n";
         assert_eq!(first_signature(index).as_deref(), Some("ami-id"));
         assert!(first_signature(b"<html>Welcome to our instance of the app</html>").is_none());
+    }
+
+    #[test]
+    fn gcp_metadata_tokens_are_recognised_and_distinct_from_aws() {
+        let json = br#"{"instance":{"serviceAccounts":{"default":{"email":"x"}}},
+                        "project":{"numericProjectId":123456789}}"#;
+        assert!(
+            first_gcp_signature(json).is_some(),
+            "GCP keys are recognised"
+        );
+        assert!(
+            first_signature(json).is_none(),
+            "GCP metadata does not trip an AWS signature"
+        );
+        assert!(first_gcp_signature(b"ordinary application response").is_none());
     }
 
     #[test]

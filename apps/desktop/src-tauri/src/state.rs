@@ -33,6 +33,7 @@ struct Inner {
     project: Option<OpenProject>,
     proxy: Option<RunningProxy>,
     scan: Option<nullhawk_active::Cancel>,
+    onboarding: Option<RunningOnboarding>,
 }
 
 /// A project the window is working in.
@@ -77,6 +78,32 @@ impl RunningProxy {
     }
 
     /// Stops the proxy, closing the port.
+    pub fn stop(self) {
+        self.handle.abort();
+    }
+}
+
+/// The mobile-onboarding HTTP server, serving the CA and a setup page on the LAN so a
+/// phone can fetch them directly. Same task-not-object shape as [`RunningProxy`].
+pub struct RunningOnboarding {
+    /// The address actually bound (0.0.0.0:port).
+    pub addr: SocketAddr,
+    /// Aborting this closes the listener.
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl RunningOnboarding {
+    /// Builds a handle for an already-spawned onboarding task.
+    pub fn new(addr: SocketAddr, handle: tokio::task::JoinHandle<()>) -> Self {
+        Self { addr, handle }
+    }
+
+    /// Whether the task is still running.
+    pub fn is_running(&self) -> bool {
+        !self.handle.is_finished()
+    }
+
+    /// Stops the server, closing the port.
     pub fn stop(self) {
         self.handle.abort();
     }
@@ -242,6 +269,41 @@ impl AppState {
             Some(proxy) if proxy.is_running() => Ok(Some(proxy.addr)),
             Some(_) => {
                 inner.proxy = None;
+                Ok(None)
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Records a newly started onboarding server, replacing any previous one.
+    pub fn set_onboarding(&self, server: RunningOnboarding) -> Result<()> {
+        let mut inner = self.lock()?;
+        if let Some(previous) = inner.onboarding.take() {
+            previous.stop();
+        }
+        inner.onboarding = Some(server);
+        Ok(())
+    }
+
+    /// Stops the onboarding server if one is running. Returns whether there was one.
+    pub fn stop_onboarding(&self) -> Result<bool> {
+        let mut inner = self.lock()?;
+        match inner.onboarding.take() {
+            Some(server) => {
+                server.stop();
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Where the onboarding server is listening, if it is. Clears a dead handle.
+    pub fn onboarding_address(&self) -> Result<Option<SocketAddr>> {
+        let mut inner = self.lock()?;
+        match &inner.onboarding {
+            Some(server) if server.is_running() => Ok(Some(server.addr)),
+            Some(_) => {
+                inner.onboarding = None;
                 Ok(None)
             }
             None => Ok(None),

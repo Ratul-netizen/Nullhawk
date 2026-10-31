@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 
+import { SessionWidget } from "./components/SessionWidget";
 import { AuthzView } from "./views/AuthzView";
 import { DashboardView } from "./views/DashboardView";
 import { DecoderView } from "./views/DecoderView";
@@ -293,6 +294,7 @@ export default function App() {
           <span className={proxy.running ? "chip live" : "chip"}>
             {proxy.running ? `proxy ${proxy.address}` : "proxy stopped"}
           </span>
+          <SessionWidget project={project} />
         </div>
       </header>
 

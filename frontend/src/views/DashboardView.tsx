@@ -19,6 +19,8 @@ import {
   type TopoLink,
   type TopoNode,
 } from "../components/TopologyGraph";
+import { AppTreemap } from "../components/AppTreemap";
+import { InfraFlow } from "../components/InfraFlow";
 import {
   APP_LEGEND,
   buildAppGraph,
@@ -265,23 +267,35 @@ export function DashboardView({
                 </button>
               </div>
               <span className="muted small">
-                {isSample ? "sample" : "drag to orbit · scroll to zoom"}
+                {isSample
+                  ? "sample"
+                  : graphMode === "app"
+                    ? "click a group to drill · hover for detail"
+                    : "request path · inferred from captured signals"}
               </span>
             </div>
           </div>
           <div className="topo-stage">
-            <TopologyGraph
-              nodes={nodes}
-              links={links}
-              height={430}
-              onNodeClick={setSelectedNode}
-            />
-            {nodeDetail && (
-              <NodeDetail
-                detail={nodeDetail}
-                onClose={() => setSelectedNode(null)}
-                onNavigate={onNavigate}
-              />
+            {isSample ? (
+              <>
+                <TopologyGraph
+                  nodes={nodes}
+                  links={links}
+                  height={430}
+                  onNodeClick={setSelectedNode}
+                />
+                {nodeDetail && (
+                  <NodeDetail
+                    detail={nodeDetail}
+                    onClose={() => setSelectedNode(null)}
+                    onNavigate={onNavigate}
+                  />
+                )}
+              </>
+            ) : graphMode === "app" ? (
+              <AppTreemap hosts={data.hosts} height={430} />
+            ) : (
+              <InfraFlow hosts={data.hosts} signals={data.signals} height={430} />
             )}
           </div>
           <div className="topo-legend">

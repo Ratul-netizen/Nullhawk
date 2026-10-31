@@ -55,6 +55,7 @@
 
 pub mod blob;
 pub mod candidates;
+pub mod crypt;
 pub mod error;
 pub mod findings;
 pub mod identities;

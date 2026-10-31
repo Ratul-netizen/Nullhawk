@@ -80,6 +80,15 @@ pub enum StorageError {
     /// Filesystem failure opening or creating the project file.
     #[error("project file I/O error: {0}")]
     Io(#[from] std::io::Error),
+
+    /// A credential could not be encrypted or decrypted at rest.
+    ///
+    /// Sealing fails closed: an identity is never written in cleartext because the key
+    /// was unavailable. Opening fails when the OS keystore has lost the key the project's
+    /// credentials were sealed under (a different machine or user account), which is the
+    /// protection working as intended, not corruption.
+    #[error("credential encryption error: {0}")]
+    Crypto(String),
 }
 
 impl From<r2d2::Error> for StorageError {

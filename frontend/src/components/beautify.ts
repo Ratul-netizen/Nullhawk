@@ -7,7 +7,36 @@
  * because a body we cannot format is exactly the case where guessing would mislead.
  */
 
-export type BodyLang = "json" | "xml" | "html" | null;
+import { js as beautifyJs, css as beautifyCss } from "js-beautify";
+
+export type BodyLang =
+  | "json"
+  | "xml"
+  | "html"
+  | "plist"
+  | "js"
+  | "ts"
+  | "css"
+  | "java"
+  | "kotlin"
+  | "swift"
+  | "objc"
+  | "csharp"
+  | "cpp"
+  | "c"
+  | "go"
+  | "rust"
+  | "python"
+  | "ruby"
+  | "php"
+  | "bash"
+  | "sql"
+  | "yaml"
+  | "properties"
+  | "groovy"
+  | "dockerfile"
+  | "ini"
+  | null;
 
 /** HTML elements that never have a closing tag, so they must not open an indent level. */
 const VOID_ELEMENTS = new Set([
@@ -16,28 +45,103 @@ const VOID_ELEMENTS = new Set([
 ]);
 
 /** Guess the body's language from a Content-Type hint first, then the content itself. */
-export function detectLang(content: string, contentType?: string | null): BodyLang {
-  const ct = (contentType ?? "").toLowerCase();
-  if (ct.includes("json")) return "json";
-  if (ct.includes("html")) return "html";
-  if (ct.includes("xml")) return "xml";
+export function detectLang(
+  content: string,
+  contentType?: string | null,
+  name?: string | null,
+): BodyLang {
+  const fromCt = langFromContentType((contentType ?? "").toLowerCase());
+  if (fromCt) return fromCt;
 
+  const fromName = name ? langFromName(name) : null;
+  if (fromName) return fromName;
+
+  // Content fallback for the structured web bodies only — guessing a source language from
+  // its text alone is unreliable, so those rely on the content-type or filename.
   const trimmed = content.trimStart();
   if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
     return tryJson(content) !== null ? "json" : null;
   }
   if (trimmed.startsWith("<")) {
     const head = trimmed.slice(0, 200).toLowerCase();
-    return head.includes("<!doctype html") || head.includes("<html") ? "html" : "xml";
+    if (head.includes("<!doctype html") || head.includes("<html")) return "html";
+    if (head.includes("<!doctype plist") || head.includes("<plist")) return "plist";
+    return "xml";
   }
   return null;
 }
 
+/** The language a Content-Type implies, across web and app-source media types. */
+function langFromContentType(ct: string): BodyLang {
+  if (!ct) return null;
+  if (ct.includes("json")) return "json";
+  if (ct.includes("typescript")) return "ts";
+  if (ct.includes("javascript") || ct.includes("ecmascript")) return "js";
+  if (ct.includes("css")) return "css";
+  if (ct.includes("html")) return "html";
+  if (ct.includes("xml")) return "xml";
+  if (ct.includes("yaml")) return "yaml";
+  if (ct.includes("x-sh") || ct.includes("shellscript")) return "bash";
+  if (ct.includes("x-python")) return "python";
+  if (ct.includes("x-ruby")) return "ruby";
+  if (ct.includes("x-php") || ct.includes("/php")) return "php";
+  if (ct.includes("x-java")) return "java";
+  if (ct.includes("x-kotlin")) return "kotlin";
+  if (ct.includes("x-swift")) return "swift";
+  if (ct.includes("x-csharp")) return "csharp";
+  if (ct.includes("x-go")) return "go";
+  if (ct.includes("x-rust")) return "rust";
+  if (ct.includes("sql")) return "sql";
+  return null;
+}
+
+const EXT_LANG: Record<string, BodyLang> = {
+  json: "json", js: "js", jsx: "js", mjs: "js", cjs: "js",
+  ts: "ts", tsx: "ts",
+  html: "html", htm: "html", xml: "xml", plist: "plist", css: "css",
+  java: "java", kt: "kotlin", kts: "kotlin",
+  swift: "swift", m: "objc", mm: "objc",
+  cs: "csharp", cpp: "cpp", cc: "cpp", cxx: "cpp", hpp: "cpp", hh: "cpp",
+  c: "c", h: "c", go: "go", rs: "rust",
+  py: "python", rb: "ruby", php: "php",
+  sh: "bash", bash: "bash", zsh: "bash",
+  sql: "sql", yaml: "yaml", yml: "yaml",
+  properties: "properties", gradle: "groovy", groovy: "groovy",
+  ini: "ini", cfg: "ini", toml: "ini",
+};
+
+/** The language implied by a filename or path — its extension, or a known basename. Use
+ *  this when viewing extracted or decompiled app files (Android/iOS/desktop), where the
+ *  name carries the type that an HTTP Content-Type would otherwise give. */
+export function langFromName(name: string): BodyLang {
+  const base = (name.split(/[\\/?#]/).pop() ?? name).toLowerCase();
+  if (base === "dockerfile") return "dockerfile";
+  if (base === "androidmanifest.xml") return "xml";
+  if (base.endsWith(".plist")) return "plist";
+  const ext = base.includes(".") ? base.slice(base.lastIndexOf(".") + 1) : "";
+  return EXT_LANG[ext] ?? null;
+}
+
 /** Pretty-print for the detected language, or null if it cannot be formatted. */
 export function prettify(content: string, lang: BodyLang): string | null {
+  if (content.length > 500_000) return null; // too large to reformat responsively
   if (lang === "json") return prettyJson(content);
   if (lang === "xml" || lang === "html") return prettyMarkup(content);
+  if (lang === "js") {
+    return safeBeautify(() => beautifyJs(content, { indent_size: 2, end_with_newline: false }));
+  }
+  if (lang === "css") return safeBeautify(() => beautifyCss(content, { indent_size: 2 }));
   return null;
+}
+
+/** Run a beautifier, returning null rather than throwing on input it cannot format. */
+function safeBeautify(fn: () => string): string | null {
+  try {
+    const out = fn();
+    return out && out.length ? out : null;
+  } catch {
+    return null;
+  }
 }
 
 function tryJson(content: string): unknown | null {

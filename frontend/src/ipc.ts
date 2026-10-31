@@ -140,6 +140,21 @@ export interface CaStatus {
   trusted: boolean;
 }
 
+/** What the Mobile view needs to point a phone at the proxy and trust the CA. */
+export interface MobileSetup {
+  lan_ip: string | null;
+  proxy_running: boolean;
+  proxy_port: number | null;
+  proxy_loopback: boolean;
+  onboarding_running: boolean;
+  onboarding_port: number | null;
+  onboarding_url: string | null;
+  onboarding_qr_svg: string | null;
+  ca_present: boolean;
+  ca_fingerprint: string | null;
+  ca_path: string;
+}
+
 /** A summary of an exchange, pushed as the proxy captures it. */
 export interface TrafficEvent {
   method: string;
@@ -167,6 +182,10 @@ export const fetchEngineInfo = (): Promise<EngineInfo> =>
 
 export const openProject = (path: string): Promise<ProjectSummary> =>
   invoke<ProjectSummary>("project_open", { path });
+
+/** Native folder picker; resolves to the chosen directory, or null if dismissed. */
+export const pickDirectory = (): Promise<string | null> =>
+  invoke<string | null>("pick_directory");
 
 export const currentProject = (): Promise<ProjectSummary | null> =>
   invoke<ProjectSummary | null>("project_current");
@@ -790,6 +809,105 @@ export const branchesOf = (id: string): Promise<HistoryRow[]> =>
 
 export const caStatus = (): Promise<CaStatus> => invoke<CaStatus>("ca_status");
 
+/** Platform facts decoded from a package manifest (IPA Info.plist). */
+export interface ManifestFacts {
+  platform: string;
+  bundle_id: string | null;
+  min_os: string | null;
+  ats_arbitrary_loads: boolean | null;
+  ats_exception_domains: string[];
+  url_schemes: string[];
+  permissions: string[];
+  issues: string[];
+}
+
+/** What a dropped APK/IPA is, plus the strings pulled out of it for the miner. */
+export interface MobilePackage {
+  kind: string;
+  label: string;
+  entry_count: number;
+  total_size: number;
+  strings: string;
+  note: string | null;
+  manifest: ManifestFacts | null;
+}
+
+export const mobileSetup = (): Promise<MobileSetup> => invoke<MobileSetup>("mobile_setup");
+export const mobileAnalyze = (path: string): Promise<MobilePackage> =>
+  invoke<MobilePackage>("mobile_analyze", { path });
+
+/** The result of validating a leaked AWS key against STS GetCallerIdentity. */
+export interface AwsIdentity {
+  valid: boolean;
+  arn: string | null;
+  account: string | null;
+  user_id: string | null;
+  error_code: string | null;
+  error_message: string | null;
+  note: string;
+}
+
+export const cloudValidateAws = (
+  accessKey: string,
+  secret: string,
+  sessionToken: string | null,
+): Promise<AwsIdentity> =>
+  invoke<AwsIdentity>("cloud_validate_aws", { accessKey, secret, sessionToken });
+
+/** The IAM reach of a validated AWS key — what it is granted. */
+export interface AwsBlastRadius {
+  arn: string | null;
+  account: string | null;
+  user_name: string | null;
+  attached_policies: string[];
+  inline_policies: string[];
+  groups: string[];
+  admin: boolean;
+  notes: string[];
+}
+
+export const cloudAwsBlastRadius = (
+  accessKey: string,
+  secret: string,
+  sessionToken: string | null,
+): Promise<AwsBlastRadius> =>
+  invoke<AwsBlastRadius>("cloud_aws_blast_radius", { accessKey, secret, sessionToken });
+
+/** The result of validating a leaked GCP service-account key against Google's OAuth token endpoint. */
+export interface GcpIdentity {
+  valid: boolean;
+  client_email: string | null;
+  project_id: string | null;
+  error: string | null;
+  error_description: string | null;
+  note: string;
+}
+
+export const cloudValidateGcp = (keyJson: string): Promise<GcpIdentity> =>
+  invoke<GcpIdentity>("cloud_validate_gcp", { keyJson });
+
+/** The result of validating a leaked Azure service-principal secret against Azure AD. */
+export interface AzureIdentity {
+  valid: boolean;
+  tenant: string | null;
+  app_id: string | null;
+  object_id: string | null;
+  error: string | null;
+  error_description: string | null;
+  note: string;
+}
+
+export const cloudValidateAzure = (
+  tenant: string,
+  clientId: string,
+  clientSecret: string,
+): Promise<AzureIdentity> =>
+  invoke<AzureIdentity>("cloud_validate_azure", { tenant, clientId, clientSecret });
+export const mobileOnboardingStart = (): Promise<MobileSetup> =>
+  invoke<MobileSetup>("mobile_onboarding_start");
+export const mobileOnboardingStop = (): Promise<MobileSetup> =>
+  invoke<MobileSetup>("mobile_onboarding_stop");
+
 export const installCa = (): Promise<CaStatus> => invoke<CaStatus>("ca_install");
 
 export const untrustCa = (): Promise<CaStatus> => invoke<CaStatus>("ca_untrust");
@@ -852,6 +970,10 @@ export interface IdentityView {
   privilege: string;
   credential: string;
   owns: string[];
+  /** When the credential's token stops working (Unix seconds), if it says. */
+  expires: number | null;
+  /** Whether a recorded login exists that renew can replay in one click. */
+  has_login: boolean;
 }
 
 export const listIdentities = (): Promise<IdentityView[]> =>
@@ -870,6 +992,24 @@ export const addIdentity = (identity: {
  * Renews an identity's session by replaying a captured login and reading the new token from its
  * response (one of a Set-Cookie cookie, a response header, or a JSON body field).
  */
+/** The outcome of attempting to recover a JWT's HMAC signing secret. */
+export interface CrackResult {
+  found: boolean;
+  secret: string | null;
+  tool: string;
+  tried: number | null;
+  note: string;
+  hashcat_available: boolean;
+}
+
+/** Recover a JWT's HMAC secret — GPU via hashcat when a wordlist is given and hashcat is
+ *  installed, otherwise a CPU dictionary pass. */
+export const jwtCrack = (token: string, wordlist: string | null): Promise<CrackResult> =>
+  invoke<CrackResult>("jwt_crack", { token, wordlist });
+
+/** Native file picker (e.g. to choose a wordlist). */
+export const pickFile = (): Promise<string | null> => invoke<string | null>("pick_file");
+
 export const renewIdentity = (args: {
   who: string;
   from: string;

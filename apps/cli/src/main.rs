@@ -62,6 +62,7 @@ mod setup;
 mod sitemap;
 mod snapshot;
 mod surface;
+mod sweep;
 mod upload;
 mod ws;
 mod xxe;
@@ -570,6 +571,39 @@ enum Command {
         /// The most constructed requests one run may send.
         #[arg(long, value_name = "N", default_value_t = 12, requires = "construct")]
         max_attempts: usize,
+    },
+
+    /// Sweep the whole project for broken access controls (Pro).
+    ///
+    /// Works out which object identifier belongs to which identity from the captured
+    /// traffic, then has every other identity try to reach each object it does not own —
+    /// the IDOR/BOLA testing that `nullhawk authz` does for one request, done across the
+    /// whole application. Needs at least two identities with some captured traffic each.
+    AuthzSweep {
+        /// Project directory.
+        path: PathBuf,
+
+        /// Only sweep object-bearing endpoints on this host.
+        #[arg(long, value_name = "HOST")]
+        host: Option<String>,
+
+        /// The whole-sweep request ceiling, spread across the endpoints.
+        #[arg(long, value_name = "N", default_value_t = 200)]
+        budget: usize,
+
+        /// Send each lead a second time before reporting it.
+        ///
+        /// Reproduction is the difference between a Firm lead and a Confirmed one.
+        #[arg(long)]
+        verify: bool,
+
+        /// Do not verify the target's TLS certificate.
+        #[arg(short = 'k', long)]
+        insecure: bool,
+
+        /// Report the leads without writing them into the project.
+        #[arg(long)]
+        no_save: bool,
     },
 
     /// Read and triage the findings recorded in a project.
@@ -3058,6 +3092,28 @@ fn run(cli: &Cli) -> nullhawk_types::Result<()> {
             max_attempts: *max_attempts,
             json: cli.json,
         }),
+        Command::AuthzSweep {
+            path,
+            host,
+            budget,
+            verify,
+            insecure,
+            no_save,
+        } => {
+            // The whole-app sweep is the Pro flagship; the single-request `authz` stays
+            // free. It sends constructed cross-identity requests, so it gates like every
+            // other active, sending command.
+            license::gate().require(nullhawk_engine::license::Feature::ActiveScanner)?;
+            sweep::run(sweep::SweepArgs {
+                project: path,
+                host: host.as_deref(),
+                budget: *budget,
+                verify: *verify,
+                insecure: *insecure,
+                no_save: *no_save,
+                json: cli.json,
+            })
+        }
         Command::Findings {
             path,
             show,
@@ -3331,9 +3387,22 @@ mod tests {
 
     use super::*;
 
+    /// Builds and inspects the clap command on a thread with a generous stack, the way
+    /// `main` runs the whole program. The command tree is large and a debug build lays it
+    /// out on the stack while building it; a 2 MiB test thread overflows doing so, exactly
+    /// as the 1 MiB Windows main thread would without the worker `main` spawns.
+    fn on_a_big_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(f)
+            .expect("spawn test worker thread")
+            .join()
+            .expect("test worker thread panicked")
+    }
+
     #[test]
     fn the_cli_definition_is_internally_consistent() {
-        Cli::command().debug_assert();
+        on_a_big_stack(|| Cli::command().debug_assert());
     }
 
     #[test]
@@ -3342,10 +3411,12 @@ mod tests {
         // also matched the development-status paragraph the moment a line wrapped
         // before the word "scanner" — a guard that fails on its own description is
         // one somebody eventually deletes.
-        let commands: Vec<String> = Cli::command()
-            .get_subcommands()
-            .map(|command| command.get_name().to_lowercase())
-            .collect();
+        let commands: Vec<String> = on_a_big_stack(|| {
+            Cli::command()
+                .get_subcommands()
+                .map(|command| command.get_name().to_lowercase())
+                .collect()
+        });
 
         for absent in ["intruder", "workflow", "collaborate"] {
             assert!(
@@ -3367,15 +3438,26 @@ mod tests {
         // sends traffic is a word somebody had to type. A `--active` flag one
         // character away from a safe default is how a tool ends up scanning a
         // production system by accident.
-        let scan = Cli::command()
-            .get_subcommands()
-            .find(|command| command.get_name() == "scan")
-            .expect("the scan command")
-            .clone();
-        let passes: Vec<String> = scan
-            .get_subcommands()
-            .map(|command| command.get_name().to_string())
-            .collect();
+        let (passes, flags): (Vec<String>, Vec<String>) = on_a_big_stack(|| {
+            let scan = Cli::command()
+                .get_subcommands()
+                .find(|command| command.get_name() == "scan")
+                .expect("the scan command")
+                .clone();
+            let passes = scan
+                .get_subcommands()
+                .map(|command| command.get_name().to_string())
+                .collect();
+            let active = scan
+                .get_subcommands()
+                .find(|command| command.get_name() == "active")
+                .expect("the active pass");
+            let flags = active
+                .get_arguments()
+                .map(|arg| arg.get_id().to_string())
+                .collect();
+            (passes, flags)
+        });
 
         assert_eq!(
             passes,
@@ -3383,14 +3465,6 @@ mod tests {
             "{passes:?}"
         );
 
-        let active = scan
-            .get_subcommands()
-            .find(|command| command.get_name() == "active")
-            .expect("the active pass");
-        let flags: Vec<String> = active
-            .get_arguments()
-            .map(|arg| arg.get_id().to_string())
-            .collect();
         for required in ["dry_run", "yes", "max_requests"] {
             assert!(
                 flags.iter().any(|flag| flag == required),
@@ -3401,7 +3475,7 @@ mod tests {
 
     #[test]
     fn help_states_the_development_status() {
-        let help = Cli::command().render_long_help().to_string();
+        let help = on_a_big_stack(|| Cli::command().render_long_help().to_string());
         assert!(
             help.contains("M15.4"),
             "users must not mistake this for a finished tool"

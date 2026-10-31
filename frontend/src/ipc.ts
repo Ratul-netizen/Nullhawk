@@ -809,7 +809,19 @@ export const branchesOf = (id: string): Promise<HistoryRow[]> =>
 
 export const caStatus = (): Promise<CaStatus> => invoke<CaStatus>("ca_status");
 
+/** What a dropped APK/IPA is, plus the strings pulled out of it for the miner. */
+export interface MobilePackage {
+  kind: string;
+  label: string;
+  entry_count: number;
+  total_size: number;
+  strings: string;
+  note: string | null;
+}
+
 export const mobileSetup = (): Promise<MobileSetup> => invoke<MobileSetup>("mobile_setup");
+export const mobileAnalyze = (path: string): Promise<MobilePackage> =>
+  invoke<MobilePackage>("mobile_analyze", { path });
 export const mobileOnboardingStart = (): Promise<MobileSetup> =>
   invoke<MobileSetup>("mobile_onboarding_start");
 export const mobileOnboardingStop = (): Promise<MobileSetup> =>

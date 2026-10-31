@@ -2665,6 +2665,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "chrono",
+ "flate2",
  "futures",
  "nullhawk-active",
  "nullhawk-authz",

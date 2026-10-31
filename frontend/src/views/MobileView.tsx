@@ -1,11 +1,15 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import {
   mobileSetup,
   mobileOnboardingStart,
   mobileOnboardingStop,
+  mobileAnalyze,
+  pickFile,
   type MobileSetup,
+  type MobilePackage,
 } from "../ipc";
+import { mine, type MineResult } from "../lib/miner";
 
 /**
  * Mobile app testing, from the network side.
@@ -22,6 +26,10 @@ export function MobileView() {
   const [setup, setSetup] = useState<MobileSetup | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [pkg, setPkg] = useState<MobilePackage | null>(null);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [pkgError, setPkgError] = useState<string | null>(null);
+  const mined: MineResult | null = useMemo(() => (pkg ? mine(pkg.strings) : null), [pkg]);
 
   const refresh = useCallback(() => {
     mobileSetup()
@@ -48,6 +56,21 @@ export function MobileView() {
       setError(String(e));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const choosePackage = async () => {
+    const path = await pickFile();
+    if (!path) return;
+    setAnalyzing(true);
+    setPkgError(null);
+    try {
+      setPkg(await mobileAnalyze(path));
+    } catch (e) {
+      setPkgError(String(e));
+      setPkg(null);
+    } finally {
+      setAnalyzing(false);
     }
   };
 
@@ -182,7 +205,80 @@ export function MobileView() {
       </section>
 
       <section className="card identity-card">
-        <h2>3 · Certificate pinning</h2>
+        <h2>3 · Static analysis — the app package</h2>
+        <p className="muted">
+          Drop an APK or IPA. Nullhawk unpacks it and runs the same secret &amp; endpoint
+          miner used across the app over everything inside — DEX, resources, plists — so
+          hardcoded keys, URLs and versioned libraries surface without a manual decompile.
+        </p>
+        <div className="row-actions" style={{ marginBottom: 12 }}>
+          <button onClick={choosePackage} disabled={analyzing}>
+            {analyzing ? "Analyzing…" : "Choose APK / IPA…"}
+          </button>
+          {pkg && (
+            <span className="muted small">
+              {pkg.kind.toUpperCase()} · {pkg.label} · {pkg.entry_count} entries ·{" "}
+              {(pkg.total_size / 1048576).toFixed(1)} MB
+            </span>
+          )}
+        </div>
+        {pkgError && <p className="notice warn">{pkgError}</p>}
+        {pkg && mined && (
+          <div className="miner-grid">
+            <section className="card">
+              <h3>Secrets ({mined.secrets.length})</h3>
+              {mined.secrets.length === 0 ? (
+                <p className="muted">None matched.</p>
+              ) : (
+                <ul className="mine-list">
+                  {mined.secrets.slice(0, 200).map((s, i) => (
+                    <li key={i}>
+                      <span className="tag insecure">{s.type}</span>
+                      <code>{s.match}</code>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+            <section className="card">
+              <h3>Endpoints ({mined.endpoints.length})</h3>
+              {mined.endpoints.length === 0 ? (
+                <p className="muted">None matched.</p>
+              ) : (
+                <ul className="mine-list">
+                  {mined.endpoints.slice(0, 200).map((e, i) => (
+                    <li key={i}>
+                      <span className="tag">{e.kind}</span>
+                      <code>{e.value}</code>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+            <section className="card">
+              <h3>Libraries ({mined.libraries.length})</h3>
+              {mined.libraries.length === 0 ? (
+                <p className="muted">None detected.</p>
+              ) : (
+                <ul className="mine-list">
+                  {mined.libraries.map((l, i) => (
+                    <li key={i}>
+                      <code>
+                        {l.name} {l.version}
+                      </code>
+                      {l.advisory && <span className="tag insecure">{l.advisory}</span>}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+          </div>
+        )}
+        {pkg?.note && <p className="muted small">{pkg.note}</p>}
+      </section>
+
+      <section className="card identity-card">
+        <h2>4 · Certificate pinning</h2>
         <p className="muted">
           A pinned app rejects even a trusted CA, so interception shows nothing until the
           pin is defeated. That is done off Nullhawk, on the device or the binary:
@@ -205,17 +301,12 @@ export function MobileView() {
       </section>
 
       <section className="card identity-card">
-        <h2>4 · Off the wire</h2>
+        <h2>5 · Off the wire</h2>
         <p className="muted">
-          Interception covers the network. A full mobile assessment also looks at what the
-          proxy never sees — and some of it comes back here:
+          Interception covers the network, and static analysis (above) covers the package.
+          A full mobile assessment also looks at what neither sees:
         </p>
         <ul className="steps">
-          <li>
-            <strong>The binary</strong> — decompile the APK/IPA (jadx, apktool, unzip) and
-            paste the strings into the <strong>Toolkit → Secret &amp; endpoint miner</strong>
-            to pull hardcoded keys, endpoints and versioned libraries out of it.
-          </li>
           <li>
             <strong>Local storage</strong> — shared preferences, SQLite, keychain/keystore
             entries, cached files: check for tokens and PII stored in the clear.

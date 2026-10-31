@@ -81,6 +81,7 @@ pub fn run() {
             mobile::mobile_setup,
             mobile::mobile_onboarding_start,
             mobile::mobile_onboarding_stop,
+            mobile::mobile_analyze,
             commands::scope_list,
             commands::scope_add,
             commands::scope_remove,

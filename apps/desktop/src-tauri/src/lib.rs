@@ -84,6 +84,7 @@ pub fn run() {
             mobile::mobile_onboarding_stop,
             mobile::mobile_analyze,
             cloud::cloud_validate_aws,
+            cloud::cloud_aws_blast_radius,
             cloud::cloud_validate_gcp,
             cloud::cloud_validate_azure,
             commands::scope_list,

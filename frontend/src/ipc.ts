@@ -854,6 +854,25 @@ export const cloudValidateAws = (
 ): Promise<AwsIdentity> =>
   invoke<AwsIdentity>("cloud_validate_aws", { accessKey, secret, sessionToken });
 
+/** The IAM reach of a validated AWS key — what it is granted. */
+export interface AwsBlastRadius {
+  arn: string | null;
+  account: string | null;
+  user_name: string | null;
+  attached_policies: string[];
+  inline_policies: string[];
+  groups: string[];
+  admin: boolean;
+  notes: string[];
+}
+
+export const cloudAwsBlastRadius = (
+  accessKey: string,
+  secret: string,
+  sessionToken: string | null,
+): Promise<AwsBlastRadius> =>
+  invoke<AwsBlastRadius>("cloud_aws_blast_radius", { accessKey, secret, sessionToken });
+
 /** The result of validating a leaked GCP service-account key against Google's OAuth token endpoint. */
 export interface GcpIdentity {
   valid: boolean;

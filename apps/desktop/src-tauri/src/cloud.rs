@@ -71,12 +71,16 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
 ///
 /// `amz_date` is ISO-8601 basic (YYYYMMDDTHHMMSSZ) and `datestamp` is YYYYMMDD; both are
 /// passed in rather than read from the clock so the signing is a pure, testable function.
+#[allow(clippy::too_many_arguments)]
 fn authorization(
     access_key: &str,
     secret: &str,
     session_token: Option<&str>,
     amz_date: &str,
     datestamp: &str,
+    service: &str,
+    host: &str,
+    body: &str,
 ) -> String {
     let signed_headers = if session_token.is_some() {
         "content-type;host;x-amz-date;x-amz-security-token"
@@ -85,17 +89,17 @@ fn authorization(
     };
 
     let mut canonical_headers =
-        format!("content-type:{CONTENT_TYPE}\nhost:{HOST}\nx-amz-date:{amz_date}\n");
+        format!("content-type:{CONTENT_TYPE}\nhost:{host}\nx-amz-date:{amz_date}\n");
     if let Some(token) = session_token {
         canonical_headers.push_str(&format!("x-amz-security-token:{token}\n"));
     }
 
-    let payload_hash = sha256_hex(BODY.as_bytes());
+    let payload_hash = sha256_hex(body.as_bytes());
     // Method, canonical URI, (empty) query, canonical headers, signed headers, payload hash.
     let canonical_request =
         format!("POST\n/\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}");
 
-    let scope = format!("{datestamp}/{REGION}/{SERVICE}/aws4_request");
+    let scope = format!("{datestamp}/{REGION}/{service}/aws4_request");
     let string_to_sign = format!(
         "AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}",
         sha256_hex(canonical_request.as_bytes())
@@ -103,13 +107,74 @@ fn authorization(
 
     let k_date = hmac_sha256(format!("AWS4{secret}").as_bytes(), datestamp.as_bytes());
     let k_region = hmac_sha256(&k_date, REGION.as_bytes());
-    let k_service = hmac_sha256(&k_region, SERVICE.as_bytes());
+    let k_service = hmac_sha256(&k_region, service.as_bytes());
     let k_signing = hmac_sha256(&k_service, b"aws4_request");
     let signature = hex(&hmac_sha256(&k_signing, string_to_sign.as_bytes()));
 
     format!(
         "AWS4-HMAC-SHA256 Credential={access_key}/{scope}, SignedHeaders={signed_headers}, Signature={signature}"
     )
+}
+
+/// An AWS access key, as borrowed for signing.
+struct AwsCreds<'a> {
+    access_key: &'a str,
+    secret: &'a str,
+    session_token: Option<&'a str>,
+}
+
+/// Signs and sends one `application/x-www-form-urlencoded` POST to an AWS query API
+/// (`host`, `service`), returning the response status and body. The region is always
+/// us-east-1 — both STS and IAM are global services signed there.
+async fn aws_post(
+    creds: &AwsCreds<'_>,
+    service: &str,
+    host: &str,
+    body: &str,
+) -> CommandResult<(u16, String)> {
+    let now = chrono::Utc::now();
+    let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
+    let datestamp = now.format("%Y%m%d").to_string();
+    let auth = authorization(
+        creds.access_key,
+        creds.secret,
+        creds.session_token,
+        &amz_date,
+        &datestamp,
+        service,
+        host,
+        body,
+    );
+
+    let (svc, path) =
+        HttpService::parse_url(&format!("https://{host}/")).map_err(|e| e.to_string())?;
+    let mut headers = Headers::new();
+    headers.set("Host", host);
+    headers.set("Content-Type", CONTENT_TYPE);
+    headers.set("X-Amz-Date", amz_date);
+    if let Some(token) = creds.session_token {
+        headers.set("X-Amz-Security-Token", token);
+    }
+    headers.set("Authorization", auth);
+    headers.set("Content-Length", body.len().to_string());
+
+    let request = HttpRequest {
+        service: svc,
+        method: "POST".to_string(),
+        path,
+        version: HttpVersion::Http11,
+        headers,
+        body: Bytes::from(body.to_string()),
+    };
+
+    let exchange = TcpTransport::new()
+        .send(request, SendOptions::interactive(Origin::Repeater))
+        .await
+        .map_err(|e| format!("could not reach AWS {service}: {e}"))?;
+    Ok((
+        exchange.response.status,
+        String::from_utf8_lossy(&exchange.response.body).into_owned(),
+    ))
 }
 
 /// Extracts the text between `<tag>` and `</tag>` in a small XML document.
@@ -173,46 +238,172 @@ pub async fn cloud_validate_aws(
         return Err("both an access key id and a secret access key are required".into());
     }
 
-    let now = chrono::Utc::now();
-    let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
-    let datestamp = now.format("%Y%m%d").to_string();
-    let auth = authorization(
-        &access_key,
-        &secret,
-        session_token.as_deref(),
-        &amz_date,
-        &datestamp,
-    );
+    let creds = AwsCreds {
+        access_key: &access_key,
+        secret: &secret,
+        session_token: session_token.as_deref(),
+    };
+    let (status, body) = aws_post(&creds, SERVICE, HOST, BODY).await?;
+    Ok(interpret(status, &body))
+}
 
-    let (service, path) =
-        HttpService::parse_url(&format!("https://{HOST}/")).map_err(|e| e.to_string())?;
-    let mut headers = Headers::new();
-    headers.set("Host", HOST);
-    headers.set("Content-Type", CONTENT_TYPE);
-    headers.set("X-Amz-Date", amz_date);
-    if let Some(token) = &session_token {
-        headers.set("X-Amz-Security-Token", token);
+// ---------------------------------------------------------------------------
+// AWS — map a validated key's blast radius
+// ---------------------------------------------------------------------------
+//
+// Validation answers "is it live and whose is it". The next question a tester asks is
+// "what can it do". This reads the principal's own IAM grants — the attached managed
+// policies, inline policy names and group memberships — with read-only IAM calls scoped
+// to the key's own user. It is self-introspection, not account enumeration: it asks only
+// about the identity the key already is. A key that cannot read its own policies simply
+// returns AccessDenied, which is itself reported as a note. Only run this against a key
+// you are authorised to test.
+
+const IAM_HOST: &str = "iam.amazonaws.com";
+const IAM_SERVICE: &str = "iam";
+const IAM_VERSION: &str = "2010-05-08";
+
+/// What a validated AWS key is granted — its reach within the account.
+#[derive(Debug, Clone, Serialize)]
+pub struct AwsBlastRadius {
+    pub arn: Option<String>,
+    pub account: Option<String>,
+    /// The IAM user name, when the principal is an IAM user.
+    pub user_name: Option<String>,
+    /// Attached managed-policy names.
+    pub attached_policies: Vec<String>,
+    /// Inline policy names on the user.
+    pub inline_policies: Vec<String>,
+    /// Group memberships.
+    pub groups: Vec<String>,
+    /// Whether AdministratorAccess is attached (full account control).
+    pub admin: bool,
+    /// Human notes, including any IAM reads the key was not permitted to make.
+    pub notes: Vec<String>,
+}
+
+/// Collects the text of every `<tag>…</tag>` in a small XML document (STS/IAM list
+/// responses repeat member elements like `<PolicyName>`).
+fn all_between(xml: &str, tag: &str) -> Vec<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let mut out = Vec::new();
+    let mut rest = xml;
+    while let Some(s) = rest.find(&open) {
+        let start = s + open.len();
+        let Some(e) = rest[start..].find(&close) else {
+            break;
+        };
+        out.push(rest[start..start + e].trim().to_string());
+        rest = &rest[start + e + close.len()..];
     }
-    headers.set("Authorization", auth);
-    headers.set("Content-Length", BODY.len().to_string());
+    out
+}
 
-    let request = HttpRequest {
-        service,
-        method: "POST".to_string(),
-        path,
-        version: HttpVersion::Http11,
-        headers,
-        body: Bytes::from_static(BODY.as_bytes()),
+/// Extracts the IAM user name from a user ARN (`arn:aws:iam::123:user/path/Bob` → `Bob`);
+/// returns None for a role or other non-user principal.
+fn user_from_arn(arn: &str) -> Option<String> {
+    let after = arn.split(":user/").nth(1)?;
+    Some(after.rsplit('/').next().unwrap_or(after).to_string())
+}
+
+/// Turns a non-200 IAM response into a note naming why the read failed.
+fn denied_note(body: &str, action: &str) -> String {
+    match between(body, "Code") {
+        Some(code) => {
+            format!("Could not {action}: {code} — the key lacks that IAM read permission.")
+        }
+        None => format!("Could not {action}."),
+    }
+}
+
+/// Maps the blast radius of a (presumed live) AWS key via read-only IAM self-queries.
+#[tauri::command]
+pub async fn cloud_aws_blast_radius(
+    access_key: String,
+    secret: String,
+    session_token: Option<String>,
+) -> CommandResult<AwsBlastRadius> {
+    let access_key = access_key.trim().to_string();
+    let secret = secret.trim().to_string();
+    let session_token = session_token
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty());
+    if access_key.is_empty() || secret.is_empty() {
+        return Err("both an access key id and a secret access key are required".into());
+    }
+    let creds = AwsCreds {
+        access_key: &access_key,
+        secret: &secret,
+        session_token: session_token.as_deref(),
     };
 
-    let exchange = TcpTransport::new()
-        .send(request, SendOptions::interactive(Origin::Repeater))
-        .await
-        .map_err(|e| format!("could not reach AWS STS: {e}"))?;
+    // Confirm the key and learn the principal first.
+    let (status, id_body) = aws_post(&creds, SERVICE, HOST, BODY).await?;
+    if status != 200 {
+        return Err(match between(&id_body, "Code") {
+            Some(code) => format!("the key did not authenticate: {code}"),
+            None => format!("the key did not authenticate (HTTP {status})"),
+        });
+    }
+    let arn = between(&id_body, "Arn");
+    let account = between(&id_body, "Account");
+    let user_name = arn.as_deref().and_then(user_from_arn);
 
-    let status = exchange.response.status;
-    let body = String::from_utf8_lossy(&exchange.response.body);
-    Ok(interpret(status, &body))
+    let mut attached_policies = Vec::new();
+    let mut inline_policies = Vec::new();
+    let mut groups = Vec::new();
+    let mut notes = Vec::new();
+
+    if let Some(user) = &user_name {
+        let u = form_encode(user);
+
+        let body = format!("Action=ListAttachedUserPolicies&UserName={u}&Version={IAM_VERSION}");
+        match aws_post(&creds, IAM_SERVICE, IAM_HOST, &body).await {
+            Ok((200, b)) => attached_policies = all_between(&b, "PolicyName"),
+            Ok((_, b)) => notes.push(denied_note(&b, "list attached managed policies")),
+            Err(e) => notes.push(e),
+        }
+
+        let body = format!("Action=ListUserPolicies&UserName={u}&Version={IAM_VERSION}");
+        match aws_post(&creds, IAM_SERVICE, IAM_HOST, &body).await {
+            Ok((200, b)) => inline_policies = all_between(&b, "member"),
+            Ok((_, b)) => notes.push(denied_note(&b, "list inline policies")),
+            Err(e) => notes.push(e),
+        }
+
+        let body = format!("Action=ListGroupsForUser&UserName={u}&Version={IAM_VERSION}");
+        match aws_post(&creds, IAM_SERVICE, IAM_HOST, &body).await {
+            Ok((200, b)) => groups = all_between(&b, "GroupName"),
+            Ok((_, b)) => notes.push(denied_note(&b, "list group memberships")),
+            Err(e) => notes.push(e),
+        }
+    } else {
+        notes.push(
+            "The principal is a role or federated identity, not an IAM user — self-introspection \
+             via IAM user APIs does not apply. Inspect the assumed role's policies instead."
+                .to_string(),
+        );
+    }
+
+    let admin = attached_policies.iter().any(|p| p == "AdministratorAccess");
+    if admin {
+        notes.push(
+            "AdministratorAccess is attached — this key has full control of the account."
+                .to_string(),
+        );
+    }
+
+    Ok(AwsBlastRadius {
+        arn,
+        account,
+        user_name,
+        attached_policies,
+        inline_policies,
+        groups,
+        admin,
+        notes,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -604,6 +795,9 @@ mod tests {
             None,
             "20250101T000000Z",
             "20250101",
+            SERVICE,
+            HOST,
+            BODY,
         );
         let b = authorization(
             "AKIAEXAMPLE",
@@ -611,6 +805,9 @@ mod tests {
             None,
             "20250101T000000Z",
             "20250101",
+            SERVICE,
+            HOST,
+            BODY,
         );
         assert_eq!(a, b, "same inputs sign the same");
         assert!(a.starts_with(
@@ -618,6 +815,19 @@ mod tests {
         ));
         assert!(a.contains("SignedHeaders=content-type;host;x-amz-date,"));
         assert!(a.contains("Signature="));
+        // A different service changes the scope and thus the signature.
+        let iam = authorization(
+            "AKIAEXAMPLE",
+            "secret",
+            None,
+            "20250101T000000Z",
+            "20250101",
+            IAM_SERVICE,
+            IAM_HOST,
+            "Action=ListUserPolicies&UserName=x&Version=2010-05-08",
+        );
+        assert!(iam.contains("/iam/aws4_request"));
+        assert_ne!(a, iam, "a different service signs differently");
         // A session token adds the security-token header to the signed set.
         let withtok = authorization(
             "AKIAEXAMPLE",
@@ -625,6 +835,9 @@ mod tests {
             Some("TOK"),
             "20250101T000000Z",
             "20250101",
+            SERVICE,
+            HOST,
+            BODY,
         );
         assert!(
             withtok.contains("SignedHeaders=content-type;host;x-amz-date;x-amz-security-token,")
@@ -660,6 +873,43 @@ mod tests {
         assert!(!id.valid);
         assert_eq!(id.error_code.as_deref(), Some("InvalidClientTokenId"));
         assert!(id.note.contains("InvalidClientTokenId"));
+    }
+
+    #[test]
+    fn all_between_collects_every_match() {
+        let xml = "<AttachedPolicies>\
+                   <member><PolicyName>ReadOnlyAccess</PolicyName></member>\
+                   <member><PolicyName>AdministratorAccess</PolicyName></member>\
+                   </AttachedPolicies>";
+        assert_eq!(
+            all_between(xml, "PolicyName"),
+            vec!["ReadOnlyAccess", "AdministratorAccess"]
+        );
+        assert!(all_between(xml, "GroupName").is_empty());
+    }
+
+    #[test]
+    fn user_name_is_read_from_a_user_arn() {
+        assert_eq!(
+            user_from_arn("arn:aws:iam::123456789012:user/alice").as_deref(),
+            Some("alice")
+        );
+        // A path prefix resolves to the trailing user name.
+        assert_eq!(
+            user_from_arn("arn:aws:iam::123456789012:user/eng/team/bob").as_deref(),
+            Some("bob")
+        );
+        // A role or assumed-role principal is not an IAM user.
+        assert!(user_from_arn("arn:aws:sts::123456789012:assumed-role/Admin/session").is_none());
+    }
+
+    #[test]
+    fn denied_note_names_the_iam_error_code() {
+        let xml = "<ErrorResponse><Error><Code>AccessDenied</Code>\
+                   <Message>not authorized</Message></Error></ErrorResponse>";
+        let note = denied_note(xml, "list attached managed policies");
+        assert!(note.contains("AccessDenied"));
+        assert!(note.contains("list attached managed policies"));
     }
 
     // --- GCP -------------------------------------------------------------------------

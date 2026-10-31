@@ -13,11 +13,13 @@ import { generateBypasses, type BypassCandidate } from "../lib/bypass";
 import {
   bypassRun,
   cloudValidateAws,
+  cloudAwsBlastRadius,
   cloudValidateGcp,
   cloudValidateAzure,
   describeError,
   type BypassResult,
   type AwsIdentity,
+  type AwsBlastRadius,
   type GcpIdentity,
   type AzureIdentity,
 } from "../ipc";
@@ -123,17 +125,35 @@ function CloudPanel() {
   const [result, setResult] = useState<AwsIdentity | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [blast, setBlast] = useState<AwsBlastRadius | null>(null);
+  const [blastError, setBlastError] = useState<string | null>(null);
+  const [blastBusy, setBlastBusy] = useState(false);
 
   const validate = async () => {
     setBusy(true);
     setError(null);
     setResult(null);
+    setBlast(null);
+    setBlastError(null);
     try {
       setResult(await cloudValidateAws(accessKey, secret, sessionToken.trim() || null));
     } catch (e) {
       setError(describeError(e));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const mapBlast = async () => {
+    setBlastBusy(true);
+    setBlastError(null);
+    setBlast(null);
+    try {
+      setBlast(await cloudAwsBlastRadius(accessKey, secret, sessionToken.trim() || null));
+    } catch (e) {
+      setBlastError(describeError(e));
+    } finally {
+      setBlastBusy(false);
     }
   };
 
@@ -199,14 +219,65 @@ function CloudPanel() {
             {result.note}
           </h3>
           {result.valid ? (
-            <dl className="facts">
-              <dt>ARN</dt>
-              <dd className="mono small">{result.arn ?? "—"}</dd>
-              <dt>Account</dt>
-              <dd className="mono small">{result.account ?? "—"}</dd>
-              <dt>User id</dt>
-              <dd className="mono small">{result.user_id ?? "—"}</dd>
-            </dl>
+            <>
+              <dl className="facts">
+                <dt>ARN</dt>
+                <dd className="mono small">{result.arn ?? "—"}</dd>
+                <dt>Account</dt>
+                <dd className="mono small">{result.account ?? "—"}</dd>
+                <dt>User id</dt>
+                <dd className="mono small">{result.user_id ?? "—"}</dd>
+              </dl>
+              <div className="row-actions" style={{ marginTop: 12 }}>
+                <button onClick={mapBlast} disabled={blastBusy}>
+                  {blastBusy ? "Mapping…" : "Map blast radius"}
+                </button>
+                <span className="muted small">
+                  Read-only IAM self-introspection — what this key is granted.
+                </span>
+              </div>
+              {blastError && <p className="notice warn">{blastError}</p>}
+              {blast && (
+                <div style={{ marginTop: 12 }}>
+                  {blast.admin && (
+                    <p className="notice warn">
+                      AdministratorAccess — this key has full control of the account.
+                    </p>
+                  )}
+                  <dl className="facts">
+                    <dt>IAM user</dt>
+                    <dd className="mono small">{blast.user_name ?? "—"}</dd>
+                    {blast.attached_policies.length > 0 && (
+                      <>
+                        <dt>Attached policies</dt>
+                        <dd className="mono small">{blast.attached_policies.join(", ")}</dd>
+                      </>
+                    )}
+                    {blast.inline_policies.length > 0 && (
+                      <>
+                        <dt>Inline policies</dt>
+                        <dd className="mono small">{blast.inline_policies.join(", ")}</dd>
+                      </>
+                    )}
+                    {blast.groups.length > 0 && (
+                      <>
+                        <dt>Groups</dt>
+                        <dd className="mono small">{blast.groups.join(", ")}</dd>
+                      </>
+                    )}
+                  </dl>
+                  {blast.notes.length > 0 && (
+                    <ul className="mine-list">
+                      {blast.notes.map((n, i) => (
+                        <li key={i}>
+                          <span className="small">{n}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+            </>
           ) : (
             <dl className="facts">
               <dt>Code</dt>

@@ -866,6 +866,24 @@ export interface GcpIdentity {
 
 export const cloudValidateGcp = (keyJson: string): Promise<GcpIdentity> =>
   invoke<GcpIdentity>("cloud_validate_gcp", { keyJson });
+
+/** The result of validating a leaked Azure service-principal secret against Azure AD. */
+export interface AzureIdentity {
+  valid: boolean;
+  tenant: string | null;
+  app_id: string | null;
+  object_id: string | null;
+  error: string | null;
+  error_description: string | null;
+  note: string;
+}
+
+export const cloudValidateAzure = (
+  tenant: string,
+  clientId: string,
+  clientSecret: string,
+): Promise<AzureIdentity> =>
+  invoke<AzureIdentity>("cloud_validate_azure", { tenant, clientId, clientSecret });
 export const mobileOnboardingStart = (): Promise<MobileSetup> =>
   invoke<MobileSetup>("mobile_onboarding_start");
 export const mobileOnboardingStop = (): Promise<MobileSetup> =>

@@ -19,7 +19,7 @@ use bytes::Bytes;
 use nullhawk_engine::transport::{HttpTransport, Origin, SendOptions};
 use nullhawk_http::TcpTransport;
 use nullhawk_types::http::{Headers, HttpRequest, HttpService, HttpVersion};
-use nullhawk_types::jwt::base64url_encode;
+use nullhawk_types::jwt::{base64url_decode, base64url_encode};
 use ring::{digest, hmac, rand, signature};
 use serde::{Deserialize, Serialize};
 
@@ -419,6 +419,171 @@ pub async fn cloud_validate_gcp(key_json: String) -> CommandResult<GcpIdentity> 
     ))
 }
 
+// ---------------------------------------------------------------------------
+// Azure — validate a leaked service-principal secret
+// ---------------------------------------------------------------------------
+//
+// An Azure application credential is a trio: a tenant, an application (client) id, and a
+// client secret. Validation is the OAuth2 client-credentials grant against Azure AD's
+// token endpoint — present the secret and ask for a token. A 200 with an access_token
+// proves the secret is live; the token is a JWT whose (unverified) claims name the
+// application, tenant and object, which we read without using the token for anything. An
+// `invalid_client` proves the secret is wrong or expired.
+//
+// The token is requested for the ARM scope's `.default` and is never used or stored. The
+// request goes to `login.microsoftonline.com` and nowhere else. Only validate credentials
+// you are authorised to test.
+
+const AZURE_SCOPE: &str = "https://management.azure.com/.default";
+
+/// The answer to "is this Azure app secret live, and which app is it?".
+#[derive(Debug, Clone, Serialize)]
+pub struct AzureIdentity {
+    /// Whether the secret authenticated.
+    pub valid: bool,
+    /// The directory (tenant) id — from the token when valid, else echoed from the input.
+    pub tenant: Option<String>,
+    /// The application (client) id — from the token when valid, else echoed from the input.
+    pub app_id: Option<String>,
+    /// The service principal's object id, from the token's `oid` claim, when valid.
+    pub object_id: Option<String>,
+    /// Azure AD's error code when the secret did not authenticate (e.g. invalid_client).
+    pub error: Option<String>,
+    /// Azure AD's error description, when present.
+    pub error_description: Option<String>,
+    /// A one-line human summary.
+    pub note: String,
+}
+
+/// Percent-encodes a string for an `application/x-www-form-urlencoded` body (RFC 3986
+/// unreserved set passes through; everything else is `%XX`). Azure client secrets routinely
+/// contain `+`, `/` and `=`, so the secret must be encoded or the grant silently fails.
+fn form_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Decodes a JWT's payload claims without verifying its signature (we only read identity
+/// fields from a token the endpoint just minted for us).
+fn decode_claims(token: &str) -> Option<serde_json::Value> {
+    let payload = token.split('.').nth(1)?;
+    serde_json::from_slice(&base64url_decode(payload)?).ok()
+}
+
+fn non_empty(s: &str) -> Option<String> {
+    (!s.is_empty()).then(|| s.to_string())
+}
+
+fn interpret_azure(tenant_in: &str, client_id_in: &str, status: u16, body: &[u8]) -> AzureIdentity {
+    let json: serde_json::Value = serde_json::from_slice(body).unwrap_or(serde_json::Value::Null);
+
+    if status == 200 {
+        if let Some(token) = json.get("access_token").and_then(|v| v.as_str()) {
+            let claims = decode_claims(token);
+            let claim = |k: &str| {
+                claims
+                    .as_ref()
+                    .and_then(|c| c.get(k))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            };
+            let app_id = claim("appid").or_else(|| non_empty(client_id_in));
+            let note = match &app_id {
+                Some(a) => format!("Live credential — app {a}"),
+                None => "Live credential (a token was issued)".to_string(),
+            };
+            return AzureIdentity {
+                valid: true,
+                tenant: claim("tid").or_else(|| non_empty(tenant_in)),
+                app_id,
+                object_id: claim("oid"),
+                error: None,
+                error_description: None,
+                note,
+            };
+        }
+    }
+
+    let error = json
+        .get("error")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let error_description = json
+        .get("error_description")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let note = match &error {
+        Some(e) => format!("Not a valid credential: {e}"),
+        None => format!("Not a valid credential (HTTP {status})"),
+    };
+    AzureIdentity {
+        valid: false,
+        tenant: non_empty(tenant_in),
+        app_id: non_empty(client_id_in),
+        object_id: None,
+        error,
+        error_description,
+        note,
+    }
+}
+
+/// Validates an Azure service-principal secret via the client-credentials grant.
+#[tauri::command]
+pub async fn cloud_validate_azure(
+    tenant: String,
+    client_id: String,
+    client_secret: String,
+) -> CommandResult<AzureIdentity> {
+    let tenant = tenant.trim().to_string();
+    let client_id = client_id.trim().to_string();
+    let client_secret = client_secret.trim().to_string();
+    if tenant.is_empty() || client_id.is_empty() || client_secret.is_empty() {
+        return Err("a tenant, a client id and a client secret are all required".into());
+    }
+
+    let url = format!("https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token");
+    let body = format!(
+        "grant_type=client_credentials&client_id={}&client_secret={}&scope={}",
+        form_encode(&client_id),
+        form_encode(&client_secret),
+        form_encode(AZURE_SCOPE),
+    );
+
+    let (service, path) = HttpService::parse_url(&url).map_err(|e| e.to_string())?;
+    let mut headers = Headers::new();
+    headers.set("Host", "login.microsoftonline.com");
+    headers.set("Content-Type", "application/x-www-form-urlencoded");
+    headers.set("Content-Length", body.len().to_string());
+    let request = HttpRequest {
+        service,
+        method: "POST".to_string(),
+        path,
+        version: HttpVersion::Http11,
+        headers,
+        body: Bytes::from(body),
+    };
+
+    let exchange = TcpTransport::new()
+        .send(request, SendOptions::interactive(Origin::Repeater))
+        .await
+        .map_err(|e| format!("could not reach the Azure AD token endpoint: {e}"))?;
+
+    Ok(interpret_azure(
+        &tenant,
+        &client_id,
+        exchange.response.status,
+        &exchange.response.body,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -559,5 +724,60 @@ mod tests {
             Some("Invalid JWT Signature.")
         );
         assert!(id.note.contains("invalid_grant"));
+    }
+
+    // --- Azure -----------------------------------------------------------------------
+
+    #[test]
+    fn form_encode_escapes_reserved_but_not_unreserved() {
+        // A realistic Azure-secret alphabet: +, / and = must be escaped.
+        assert_eq!(form_encode("ab+cd/ef=gh"), "ab%2Bcd%2Fef%3Dgh");
+        // The RFC 3986 unreserved set passes through untouched.
+        assert_eq!(form_encode("Az09-._~"), "Az09-._~");
+    }
+
+    /// Builds a JWT whose payload carries the given claims (header and signature are inert —
+    /// the validator reads the payload only).
+    fn jwt_with_claims(claims: &str) -> String {
+        format!(
+            "{}.{}.{}",
+            base64url_encode(br#"{"alg":"RS256","typ":"JWT"}"#),
+            base64url_encode(claims.as_bytes()),
+            base64url_encode(b"signature"),
+        )
+    }
+
+    #[test]
+    fn interprets_a_live_azure_credential() {
+        let token = jwt_with_claims(
+            r#"{"appid":"11111111-1111-1111-1111-111111111111","tid":"22222222-2222-2222-2222-222222222222","oid":"33333333-3333-3333-3333-333333333333"}"#,
+        );
+        let body = format!(r#"{{"token_type":"Bearer","expires_in":3599,"access_token":"{token}"}}"#);
+        let id = interpret_azure("tenant-in", "client-in", 200, body.as_bytes());
+        assert!(id.valid);
+        // Claims from the token win over the echoed inputs.
+        assert_eq!(
+            id.app_id.as_deref(),
+            Some("11111111-1111-1111-1111-111111111111")
+        );
+        assert_eq!(
+            id.tenant.as_deref(),
+            Some("22222222-2222-2222-2222-222222222222")
+        );
+        assert_eq!(
+            id.object_id.as_deref(),
+            Some("33333333-3333-3333-3333-333333333333")
+        );
+    }
+
+    #[test]
+    fn interprets_an_invalid_azure_secret() {
+        let body = br#"{"error":"invalid_client","error_description":"AADSTS7000215: Invalid client secret provided."}"#;
+        let id = interpret_azure("tenant-in", "client-in", 401, body);
+        assert!(!id.valid);
+        assert_eq!(id.error.as_deref(), Some("invalid_client"));
+        // Falls back to echoing the inputs when there is no token to read.
+        assert_eq!(id.app_id.as_deref(), Some("client-in"));
+        assert!(id.note.contains("invalid_client"));
     }
 }

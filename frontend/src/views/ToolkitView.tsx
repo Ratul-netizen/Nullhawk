@@ -14,10 +14,12 @@ import {
   bypassRun,
   cloudValidateAws,
   cloudValidateGcp,
+  cloudValidateAzure,
   describeError,
   type BypassResult,
   type AwsIdentity,
   type GcpIdentity,
+  type AzureIdentity,
 } from "../ipc";
 import { TRANSFORMS, runPipeline, transformById } from "../lib/transforms";
 import { convert, detectFormat, type BodyFormat } from "../lib/convert";
@@ -217,7 +219,116 @@ function CloudPanel() {
       )}
 
       <GcpKeyPanel />
+      <AzureKeyPanel />
     </div>
+  );
+}
+
+function AzureKeyPanel() {
+  const [tenant, setTenant] = useState("");
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
+  const [result, setResult] = useState<AzureIdentity | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const validate = async () => {
+    setBusy(true);
+    setError(null);
+    setResult(null);
+    try {
+      setResult(await cloudValidateAzure(tenant, clientId, clientSecret));
+    } catch (e) {
+      setError(describeError(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <section className="card">
+        <h2>Cloud key check — Azure</h2>
+        <p className="muted">
+          Confirm a leaked Azure <em>service-principal secret</em> is live and learn which
+          app it is, via the client-credentials grant. The request goes to{" "}
+          <code>login.microsoftonline.com</code> and nowhere else; the minted token is never
+          used. Only validate credentials you are authorised to test.
+        </p>
+        <div className="form-grid">
+          <label>
+            Tenant (directory) id
+            <input
+              className="mono"
+              value={tenant}
+              spellCheck={false}
+              placeholder="00000000-0000-0000-0000-000000000000"
+              onChange={(e) => setTenant(e.target.value)}
+            />
+          </label>
+          <label>
+            Application (client) id
+            <input
+              className="mono"
+              value={clientId}
+              spellCheck={false}
+              placeholder="00000000-0000-0000-0000-000000000000"
+              onChange={(e) => setClientId(e.target.value)}
+            />
+          </label>
+          <label>
+            Client secret
+            <input
+              className="mono"
+              type="password"
+              value={clientSecret}
+              spellCheck={false}
+              placeholder="the secret value"
+              onChange={(e) => setClientSecret(e.target.value)}
+            />
+          </label>
+        </div>
+        <div className="row-actions" style={{ marginTop: 12 }}>
+          <button
+            onClick={validate}
+            disabled={busy || !tenant || !clientId || !clientSecret}
+          >
+            {busy ? "Checking…" : "Validate"}
+          </button>
+        </div>
+        {error && <p className="notice warn">{error}</p>}
+      </section>
+
+      {result && (
+        <section className="card">
+          <h3>
+            {result.valid ? (
+              <span className="tag insecure">LIVE</span>
+            ) : (
+              <span className="tag">not valid</span>
+            )}{" "}
+            {result.note}
+          </h3>
+          {result.valid ? (
+            <dl className="facts">
+              <dt>Application id</dt>
+              <dd className="mono small">{result.app_id ?? "—"}</dd>
+              <dt>Tenant</dt>
+              <dd className="mono small">{result.tenant ?? "—"}</dd>
+              <dt>Object id</dt>
+              <dd className="mono small">{result.object_id ?? "—"}</dd>
+            </dl>
+          ) : (
+            <dl className="facts">
+              <dt>Error</dt>
+              <dd className="mono small">{result.error ?? "—"}</dd>
+              <dt>Description</dt>
+              <dd className="small">{result.error_description ?? "—"}</dd>
+            </dl>
+          )}
+        </section>
+      )}
+    </>
   );
 }
 

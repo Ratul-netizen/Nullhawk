@@ -1,27 +1,59 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
-import { caStatus, proxyStatus, type CaStatus, type ProxyStatus } from "../ipc";
+import {
+  mobileSetup,
+  mobileOnboardingStart,
+  mobileOnboardingStop,
+  type MobileSetup,
+} from "../ipc";
 
 /**
  * Mobile app testing, from the network side.
  *
  * A phone's traffic is just traffic, so the proxy and the CA that already read a
  * browser's HTTPS read an app's too — the work is pointing the device at them and
- * trusting the certificate. This view is the setup for that, plus the parts of a mobile
- * assessment that live off the wire (pinning, the binary, local storage) said plainly so
- * nobody mistakes an intercepting proxy for the whole job.
+ * trusting the certificate. This view removes the two slow parts of that: it shows the
+ * machine's real LAN IP (no digging in settings), and runs a small on-LAN server so the
+ * phone fetches the CA and the setup steps from a single URL rather than by email or
+ * `adb push`. The off-the-wire parts of a mobile assessment (pinning, the binary, local
+ * storage) are said plainly so nobody mistakes an intercepting proxy for the whole job.
  */
 export function MobileView() {
-  const [proxy, setProxy] = useState<ProxyStatus | null>(null);
-  const [ca, setCa] = useState<CaStatus | null>(null);
+  const [setup, setSetup] = useState<MobileSetup | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    proxyStatus().then(setProxy).catch(() => undefined);
-    caStatus().then(setCa).catch(() => undefined);
+  const refresh = useCallback(() => {
+    mobileSetup()
+      .then(setSetup)
+      .catch(() => undefined);
   }, []);
 
-  const listen = proxy?.address ?? null;
-  const port = listen?.split(":").pop() ?? "8080";
+  useEffect(() => {
+    refresh();
+    // The proxy can be started/stopped on the Setup tab, so keep this in step.
+    const t = setInterval(refresh, 4000);
+    return () => clearInterval(t);
+  }, [refresh]);
+
+  const toggleOnboarding = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const next = setup?.onboarding_running
+        ? await mobileOnboardingStop()
+        : await mobileOnboardingStart();
+      setSetup(next);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const lanIp = setup?.lan_ip ?? null;
+  const proxyPort = setup?.proxy_port ?? null;
+  const proxyEndpoint = lanIp && proxyPort ? `${lanIp}:${proxyPort}` : null;
 
   return (
     <div className="mobile">
@@ -36,14 +68,32 @@ export function MobileView() {
         </div>
       </header>
 
-      <section className="card">
+      <section className="card identity-card">
         <h2>1 · Point the device at the proxy</h2>
-        {proxy?.running ? (
-          <p className="muted">
-            The proxy is listening on <code>{listen}</code>. On the device's Wi-Fi
-            settings set a <strong>manual HTTP proxy</strong> to this machine's LAN IP
-            and port <code>{port}</code>.
-          </p>
+        {setup?.proxy_running ? (
+          setup.proxy_loopback ? (
+            <p className="notice warn">
+              The proxy is bound to <code>127.0.0.1</code>, which a phone cannot reach.
+              Restart it on the <strong>Setup</strong> tab bound to{" "}
+              <code>0.0.0.0:{proxyPort}</code> so devices on the network can connect.
+            </p>
+          ) : proxyEndpoint ? (
+            <>
+              <p className="muted">
+                On the device's Wi-Fi settings, set a <strong>manual HTTP proxy</strong>{" "}
+                to:
+              </p>
+              <p className="mobile-endpoint">
+                <code>{proxyEndpoint}</code>
+              </p>
+            </>
+          ) : (
+            <p className="muted">
+              The proxy is listening on port <code>{proxyPort}</code>. Set the device's
+              manual HTTP proxy to this machine's LAN IP and that port.
+              {!lanIp && " (Could not detect the LAN IP automatically — read it from your network settings.)"}
+            </p>
+          )
         ) : (
           <p className="notice warn">
             The proxy is not running. Start it on the <strong>Setup</strong> tab first,
@@ -53,57 +103,75 @@ export function MobileView() {
         <ul className="steps">
           <li>
             <strong>Android</strong> — Settings → Wi-Fi → long-press the network → Modify →
-            Advanced → Proxy: Manual → host = this machine's LAN IP, port = {port}.
+            Advanced → Proxy: Manual.
           </li>
           <li>
-            <strong>iOS</strong> — Settings → Wi-Fi → (i) → Configure Proxy → Manual →
-            Server = LAN IP, Port = {port}.
+            <strong>iOS</strong> — Settings → Wi-Fi → (i) → Configure Proxy → Manual.
+          </li>
+          {lanIp ? (
+            <li className="muted small">
+              Detected LAN IP: <code>{lanIp}</code>. The phone must be on the same network.
+            </li>
+          ) : (
+            <li className="muted small">
+              A phone needs this machine's IP on the shared network (e.g.{" "}
+              <code>192.168.x.x</code>), not <code>127.0.0.1</code>.
+            </li>
+          )}
+        </ul>
+      </section>
+
+      <section className="card identity-card">
+        <h2>2 · Trust the CA certificate</h2>
+        <p className="muted">
+          Run the on-LAN setup server, then open its page on the phone's browser to
+          download the CA and follow the per-OS steps — no email or <code>adb push</code>.
+        </p>
+
+        <div className="row-actions" style={{ marginBottom: 12 }}>
+          <button onClick={toggleOnboarding} disabled={busy}>
+            {setup?.onboarding_running ? "Stop setup server" : "Start setup server"}
+          </button>
+        </div>
+        {error && <p className="notice warn">{error}</p>}
+
+        {setup?.onboarding_running && (
+          <p className="mobile-endpoint">
+            On the phone, open{" "}
+            <code>{setup.onboarding_url ?? `http://<this machine>:${setup.onboarding_port}/`}</code>
+            {!setup.onboarding_url && (
+              <span className="muted small">
+                {" "}
+                (LAN IP unknown — use this machine's IP with port {setup.onboarding_port})
+              </span>
+            )}
+          </p>
+        )}
+
+        <dl className="facts">
+          <dt>Fingerprint</dt>
+          <dd className="mono small">{setup?.ca_fingerprint ?? "—"}</dd>
+          <dt>Certificate file</dt>
+          <dd className="mono small">{setup?.ca_path ?? "—"}</dd>
+        </dl>
+        <ul className="steps">
+          <li>
+            <strong>Android</strong> — the page's download opens the CA-install flow:
+            Settings → Security → Install a certificate → CA certificate. Since Android 7,
+            apps trust <em>user</em> CAs only if their network-security config opts in —
+            otherwise patch the app or use a rooted device with the CA in the system store.
+          </li>
+          <li>
+            <strong>iOS</strong> — install the downloaded profile, then Settings → General →
+            About → Certificate Trust Settings and enable full trust for it.
           </li>
           <li className="muted small">
-            The listen address above is local to this machine; a phone needs the machine's
-            IP on the same network (e.g. <code>192.168.x.x</code>), not <code>127.0.0.1</code>.
+            Prefer to transfer it yourself? The <code>.crt</code> is at the path above.
           </li>
         </ul>
       </section>
 
-      <section className="card">
-        <h2>2 · Trust the CA certificate</h2>
-        {ca ? (
-          <>
-            <dl className="facts">
-              <dt>Fingerprint</dt>
-              <dd className="mono small">{ca.fingerprint}</dd>
-              <dt>Certificate</dt>
-              <dd className="mono small">{ca.directory}</dd>
-              <dt>On this machine</dt>
-              <dd className={ca.trusted ? "ok" : "muted"}>
-                {ca.trusted ? "trusted" : "not in the system store"}
-              </dd>
-            </dl>
-            <ul className="steps">
-              <li>
-                Copy the <code>.crt</code> from the certificate directory to the device
-                (email, a served file, or <code>adb push</code>).
-              </li>
-              <li>
-                <strong>Android</strong> — Settings → Security → Encryption &amp;
-                credentials → Install a certificate → CA certificate. Note: since Android
-                7, apps trust <em>user</em> CAs only if their network-security config opts
-                in — otherwise the app must be patched or run on a rooted device with the
-                CA in the system store.
-              </li>
-              <li>
-                <strong>iOS</strong> — install the profile, then Settings → General →
-                About → Certificate Trust Settings and enable full trust for it.
-              </li>
-            </ul>
-          </>
-        ) : (
-          <p className="muted">Certificate details are unavailable — open a project first.</p>
-        )}
-      </section>
-
-      <section className="card">
+      <section className="card identity-card">
         <h2>3 · Certificate pinning</h2>
         <p className="muted">
           A pinned app rejects even a trusted CA, so interception shows nothing until the
@@ -126,7 +194,7 @@ export function MobileView() {
         </ul>
       </section>
 
-      <section className="card">
+      <section className="card identity-card">
         <h2>4 · Off the wire</h2>
         <p className="muted">
           Interception covers the network. A full mobile assessment also looks at what the

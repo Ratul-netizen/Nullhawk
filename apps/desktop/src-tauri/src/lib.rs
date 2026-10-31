@@ -26,6 +26,7 @@
 //! change the answer.
 
 pub mod commands;
+pub mod mobile;
 pub mod preview;
 pub mod state;
 
@@ -77,6 +78,9 @@ pub fn run() {
             commands::ca_status,
             commands::ca_install,
             commands::ca_untrust,
+            mobile::mobile_setup,
+            mobile::mobile_onboarding_start,
+            mobile::mobile_onboarding_stop,
             commands::scope_list,
             commands::scope_add,
             commands::scope_remove,

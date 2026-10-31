@@ -140,6 +140,20 @@ export interface CaStatus {
   trusted: boolean;
 }
 
+/** What the Mobile view needs to point a phone at the proxy and trust the CA. */
+export interface MobileSetup {
+  lan_ip: string | null;
+  proxy_running: boolean;
+  proxy_port: number | null;
+  proxy_loopback: boolean;
+  onboarding_running: boolean;
+  onboarding_port: number | null;
+  onboarding_url: string | null;
+  ca_present: boolean;
+  ca_fingerprint: string | null;
+  ca_path: string;
+}
+
 /** A summary of an exchange, pushed as the proxy captures it. */
 export interface TrafficEvent {
   method: string;
@@ -793,6 +807,12 @@ export const branchesOf = (id: string): Promise<HistoryRow[]> =>
   invoke<HistoryRow[]>("repeater_tree", { id });
 
 export const caStatus = (): Promise<CaStatus> => invoke<CaStatus>("ca_status");
+
+export const mobileSetup = (): Promise<MobileSetup> => invoke<MobileSetup>("mobile_setup");
+export const mobileOnboardingStart = (): Promise<MobileSetup> =>
+  invoke<MobileSetup>("mobile_onboarding_start");
+export const mobileOnboardingStop = (): Promise<MobileSetup> =>
+  invoke<MobileSetup>("mobile_onboarding_stop");
 
 export const installCa = (): Promise<CaStatus> => invoke<CaStatus>("ca_install");
 

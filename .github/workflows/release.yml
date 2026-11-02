@@ -1,0 +1,205 @@
+name: Release
+
+# Builds Nullhawk from the private source repository (Ratul-netizen/nullhawk-core) and attaches
+# the installers to a DRAFT release here, for review before it is published. It runs in this
+# public repository because Actions minutes are free for public repos on every OS.
+#
+# Triggered by:
+#   - repository_dispatch (type "release"), sent by nullhawk-core when a vX.Y.Z tag is pushed;
+#   - workflow_dispatch, to build a tag by hand. With "publish" off it is a dry run.
+#
+# Secret: CORE_READ_TOKEN, a fine-grained PAT with Contents: read on nullhawk-core only. The
+# source is checked out on a throwaway runner; it is never committed or uploaded here. No
+# pull_request trigger exists, so fork PRs can never run this with the secret.
+on:
+  repository_dispatch:
+    types: [release]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Source tag to build (e.g. v1.1.0)"
+        required: true
+      publish:
+        description: "Create the draft release"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  SOURCE_REPO: Ratul-netizen/nullhawk-core
+  TAG: ${{ github.event.inputs.tag || github.event.client_payload.tag }}
+  # The licence PUBLIC key embedded in release builds so paid licences verify. Not a secret: it
+  # ships inside every binary.
+  NULLHAWK_LICENSE_PUBKEY: 855f05a0882ed43455cca6f4ec3ebd3ebdc92730d03df2985bca36e45ac8e503
+
+jobs:
+  release:
+    name: Build & bundle (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - name: Validate tag
+        shell: bash
+        run: |
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::not a release tag: '$TAG'" >&2; exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ env.TAG }}
+          token: ${{ secrets.CORE_READ_TOKEN }}
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98"
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # WebView2 is present on Windows runners and WKWebView on macOS; only Linux needs the
+      # WebKitGTK stack Tauri bundles against.
+      - name: Install Tauri system dependencies (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libsoup-3.0-dev \
+            build-essential
+
+      - name: Build frontend
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+        working-directory: frontend
+
+      # macOS ships universal (Intel + Apple Silicon) binaries, so one download works on every Mac.
+      - name: Build CLI
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            rustup target add x86_64-apple-darwin aarch64-apple-darwin
+            cargo build -p nullhawk-cli --release --target x86_64-apple-darwin
+            cargo build -p nullhawk-cli --release --target aarch64-apple-darwin
+          else
+            cargo build -p nullhawk-cli --release
+          fi
+
+      - name: Stage CLI binary
+        shell: bash
+        run: |
+          mkdir -p cli-dist
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp target/release/nullhawk.exe "cli-dist/nullhawk-$TAG-windows-x86_64.exe"
+          elif [ "${{ runner.os }}" = "macOS" ]; then
+            lipo -create -output "cli-dist/nullhawk-$TAG-macos-universal" \
+              target/x86_64-apple-darwin/release/nullhawk \
+              target/aarch64-apple-darwin/release/nullhawk
+          else
+            cp target/release/nullhawk "cli-dist/nullhawk-$TAG-linux-x86_64"
+          fi
+
+      # Build only: with no tagName, tauri-action bundles without touching any release.
+      # Code signing is intentionally not wired (see docs/release.md in the source repo).
+      - name: Build & bundle desktop
+        id: tauri
+        uses: tauri-apps/tauri-action@v0
+        with:
+          projectPath: apps/desktop/src-tauri
+          args: ${{ matrix.os == 'macos-latest' && '--target universal-apple-darwin' || '' }}
+
+      # Collect the installers tauri reported plus the CLI binary. A macOS `.app` is a
+      # directory, so it is tarred the way tauri-action names it on upload.
+      - name: Stage bundles
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp cli-dist/* dist/
+          echo '${{ steps.tauri.outputs.artifactPaths }}' | jq -r '.[]' | while read -r p; do
+            if [ -d "$p" ]; then
+              case "$p" in
+                *.app) tar -czf "dist/Nullhawk_universal.app.tar.gz" -C "$(dirname "$p")" "$(basename "$p")" ;;
+              esac
+            else
+              cp "$p" dist/
+            fi
+          done
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundles-${{ matrix.os }}
+          path: dist/*
+          if-no-files-found: error
+
+  # SBOM and checksums over the whole release, then the draft release on this repo.
+  publish:
+    name: SBOM, checksums & draft release
+    needs: release
+    if: github.event_name == 'repository_dispatch' || github.event.inputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ env.TAG }}
+          token: ${{ secrets.CORE_READ_TOKEN }}
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98"
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --locked
+      - name: Generate SBOM (CycloneDX)
+        run: cargo cyclonedx --format json
+      - name: Bundle the SBOM
+        run: zip -r "nullhawk-sbom-$TAG.cdx.zip" . -i '*.cdx.json'
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bundles-*
+          path: dist
+          merge-multiple: true
+      - name: Add the SBOM
+        run: mv "nullhawk-sbom-$TAG.cdx.zip" dist/
+      - name: Compute checksums
+        working-directory: dist
+        run: |
+          sha256sum * > ../SHA256SUMS
+          mv ../SHA256SUMS .
+
+      # This repo holds no source, so the tag points at its own default branch.
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$TAG" dist/* \
+            --repo "${{ github.repository }}" \
+            --target main \
+            --title "Nullhawk $TAG" \
+            --draft \
+            --notes "Nullhawk $TAG. Verify downloads against SHA256SUMS."

@@ -1,0 +1,21 @@
+[book]
+title = "Nullhawk Documentation"
+authors = ["Nullhawk"]
+description = "Tutorials and reference for Nullhawk — the evidence-first offensive security workbench."
+language = "en"
+src = "src"
+
+[output.html]
+default-theme = "navy"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/Ratul-netizen/Nullhawk"
+edit-url-template = "https://github.com/Ratul-netizen/Nullhawk/edit/main/docs-site/src/{path}"
+no-section-label = false
+
+[output.html.fold]
+enable = true
+level = 1
+
+[output.html.search]
+enable = true
+limit-results = 20

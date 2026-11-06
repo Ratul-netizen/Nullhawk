@@ -133,7 +133,7 @@ jobs:
         run: |
           mkdir -p dist
           cp cli-dist/* dist/
-          echo '${{ steps.tauri.outputs.artifactPaths }}' | jq -r '.[]' | while read -r p; do
+          echo '${{ steps.tauri.outputs.artifactPaths }}' | jq -r '.[]' | tr -d '\r' | while read -r p; do
             if [ -d "$p" ]; then
               case "$p" in
                 *.app) tar -czf "dist/Nullhawk_universal.app.tar.gz" -C "$(dirname "$p")" "$(basename "$p")" ;;

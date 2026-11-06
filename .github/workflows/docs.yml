@@ -1,14 +1,18 @@
 name: Docs
 
 # Builds the mdBook documentation site and publishes it to GitHub Pages.
+#
+# The documentation source lives in the PRIVATE nullhawk-core repo, so this
+# workflow checks that out read-only (CORE_READ_TOKEN) and builds docs-site/ from
+# it — the public repo's own docs-site/ copy is not used. It is triggered by a
+# repository_dispatch (event_type: docs) that nullhawk-core sends when docs-site/
+# changes on main, or manually via workflow_dispatch.
+#
 # Pages must be enabled once in the repo: Settings → Pages → Build and deployment →
-# Source: "GitHub Actions". After that this runs on every push to main that touches docs-site/.
+# Source: "GitHub Actions".
 on:
-  push:
-    branches: [main]
-    paths:
-      - "docs-site/**"
-      - ".github/workflows/docs.yml"
+  repository_dispatch:
+    types: [docs]
   workflow_dispatch:
 
 permissions:
@@ -20,13 +24,21 @@ concurrency:
   group: pages
   cancel-in-progress: true
 
+env:
+  SOURCE_REPO: Ratul-netizen/nullhawk-core
+
 jobs:
   build:
     runs-on: ubuntu-latest
     env:
       MDBOOK_VERSION: "0.4.40"
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out docs source (private nullhawk-core)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: main
+          token: ${{ secrets.CORE_READ_TOKEN }}
       - name: Install mdBook
         run: |
           mkdir -p "$HOME/bin"

@@ -118,10 +118,19 @@ jobs:
           fi
 
       # Build only: with no tagName, tauri-action bundles without touching any release.
-      # Code signing is intentionally not wired (see docs/release.md in the source repo).
+      # OS code signing (SmartScreen/Gatekeeper) is still not wired — that needs paid
+      # certs (see docs/release.md in the source repo). The signing keys below are the
+      # UPDATER's minisign key: they sign the self-update bundles so the installed app
+      # will only apply an update whose signature matches the public key embedded in
+      # tauri.conf.json. The key pair is unrelated to OS code signing. If the secret is
+      # absent (e.g. a fork), createUpdaterArtifacts produces unsigned bundles and the
+      # updater step below has nothing to publish.
       - name: Build & bundle desktop
         id: tauri
         uses: tauri-apps/tauri-action@v0
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: apps/desktop/src-tauri
           args: ${{ matrix.os == 'macos-latest' && '--target universal-apple-darwin' || '' }}
@@ -186,6 +195,52 @@ jobs:
           merge-multiple: true
       - name: Add the SBOM
         run: mv "nullhawk-sbom-$TAG.cdx.zip" dist/
+
+      # The manifest the installed app polls (plugins.updater.endpoints points at this
+      # repo's latest release → latest.json). One entry per platform, pairing the signed
+      # updater bundle's download URL with its minisign signature (the *.sig files
+      # emitted because bundle.createUpdaterArtifacts is on). version has the leading "v"
+      # stripped so it matches the app's own version for the updater's semver compare.
+      # Fails loudly if no signatures were produced, so a mis-set signing secret can
+      # never ship a release whose auto-update is silently broken.
+      - name: Generate update manifest (latest.json)
+        working-directory: dist
+        shell: bash
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          VERSION="${TAG#v}"
+          BASE="https://github.com/$REPO/releases/download/$TAG"
+          PLATFORMS="{}"
+          add() {
+            local sig; sig="$(cat "$2.sig")"
+            PLATFORMS="$(echo "$PLATFORMS" | jq \
+              --arg k "$1" --arg u "$BASE/$2" --arg s "$sig" \
+              '.[$k] = {signature:$s, url:$u}')"
+          }
+          shopt -s nullglob
+          for sig in *.sig; do
+            base="${sig%.sig}"
+            case "$base" in
+              *-setup.exe) add "windows-x86_64" "$base" ;;
+              *.msi) echo "$PLATFORMS" | jq -e '."windows-x86_64"' >/dev/null || add "windows-x86_64" "$base" ;;
+              *.app.tar.gz) add "darwin-x86_64" "$base"; add "darwin-aarch64" "$base" ;;
+              *.AppImage) add "linux-x86_64" "$base" ;;
+              *) echo "note: unmapped updater artifact $base" ;;
+            esac
+          done
+          jq -n \
+            --arg v "$VERSION" \
+            --arg d "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg n "Nullhawk $TAG. See the release notes." \
+            --argjson p "$PLATFORMS" \
+            '{version:$v, notes:$n, pub_date:$d, platforms:$p}' > latest.json
+          echo "=== latest.json ==="; cat latest.json
+          if [ "$(jq '.platforms | length' latest.json)" -eq 0 ]; then
+            echo "::error::no updater signatures found in dist/ — createUpdaterArtifacts off or signing secret unset" >&2
+            exit 1
+          fi
+
       - name: Compute checksums
         working-directory: dist
         run: |
